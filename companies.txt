@@ -9,8 +9,4 @@ NVDA
 GOOGL
 AMZN
 META
-TSLA
-ASML
-NVO
-ABI.BR = Anheuser-Busch
-UCB.BR = UCB
+SM
