@@ -2,13 +2,17 @@ name: Daily company check
 
 on:
   schedule:
-    - cron: "0 6 * * *"
+    - cron: "15 6-20/2 * * 1-5"
+    - cron: "15 8 * * 0,6"
   workflow_dispatch:
   push:
-    paths: [companies.txt, config.json]
+    branches: [main]
+    paths: [companies.txt, config.json, "*.py"]
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: daily-check
@@ -17,22 +21,38 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Restore data cache
+        uses: actions/cache@v4
+        with:
+          path: cache
+          key: pulse-cache-${{ github.run_id }}
+          restore-keys: pulse-cache-
       - name: Run CompanyPulse
         env:
           SEC_CONTACT_EMAIL: ${{ secrets.SEC_CONTACT_EMAIL }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           DASHBOARD_URL: ${{ vars.DASHBOARD_URL || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
         run: python pulse.py
-      - name: Save dashboard and state
+      - name: Save state
         run: |
           git config user.name "companypulse-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add docs
-          git diff --cached --quiet || git commit -m "Daily update $(date -u +%F)"
+          git add state
+          git diff --cached --quiet || git commit -m "Update state $(date -u '+%F %H:%M')"
+          git pull --rebase --autostash -q || true
           git push
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
