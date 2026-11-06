@@ -1,0 +1,19 @@
+{
+  "revenue_growth_threshold": 0.10,
+  "fcf_margin_threshold": 0.10,
+  "roe_threshold": 0.15,
+  "max_debt_to_equity": 1.0,
+  "dilution_threshold": 0.03,
+  "strong_score": 70,
+  "weak_score": 40,
+  "notify_positive": true,
+  "notify_negative": true,
+  "notify_new_filings": true,
+  "daily_summary": true,
+
+  "discovery": true,
+  "discovery_min_score": 75,
+  "discovery_min_revenue": 100000000,
+  "discovery_exchanges": ["Nasdaq", "NYSE"],
+  "notify_discoveries": true
+}

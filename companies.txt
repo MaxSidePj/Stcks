@@ -1,0 +1,11 @@
+# One ticker per line. Edit this file (also possible from the GitHub app on your phone).
+# Lines starting with # are ignored. Only companies listed in the US (SEC filers) work.
+AAPL
+MSFT
+NVDA
+GOOGL
+AMZN
+META
+TSLA
+ASML
+NVO
