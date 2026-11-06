@@ -1,0 +1,113 @@
+# CompanyPulse: free company screener and alerts on your iPhone
+
+Everything runs for free in the cloud through GitHub Actions. Nothing runs on a computer. You use it entirely on your iPhone:
+
+- **Discover:** every morning about 2,600 US-listed companies (Nasdaq and NYSE, revenue over $100M) are scored on
+  revenue growth, free cash flow, margins, return on equity, debt and dilution. The dashboard shows these lists:
+  - **New on your radar:** companies whose score crossed 75 since yesterday. You also get a push notification.
+  - **Biggest improvers:** score up 10 or more points since the last check.
+  - **Top ranked**, **Fast growers** (+25% revenue, profitable, positive free cash flow), **Growth accelerating**,
+    **Cash machines** (free cash flow of 25% or more of revenue) and **Turnarounds** (newly profitable).
+  - **Explore all:** search and filter every company, e.g. score ≥ 75 and growth ≥ 20%, sorted by FCF margin.
+- **Watchlist:** companies you pick in `companies.txt` get a deeper analysis with quarterly data and a notification for every new filing.
+- **Push notifications** come through the free *ntfy* app, and the dashboard can be added to your home screen like an app.
+
+## Setup from your iPhone (about 15 minutes, all free)
+
+**Accounts:** use your own **personal** GitHub account. Create one at github.com if you don't have one; never use a work account.
+You don't need to share it with anyone.
+
+1. **ntfy:** install **ntfy** from the App Store. Tap **+** and subscribe to a long secret topic name, e.g. `pulse-k8f2m9x7q3`.
+   Anyone who knows the name can read your alerts, so keep it random.
+2. **Repo:** on github.com, in Safari, tap **+ → New repository**. Name it e.g. `pulse`, make it **Public** (required
+   for the free dashboard), tick **Add a README**, and create it.
+3. **Upload the files:** in the repo, tap **Add file → Upload files** and select `pulse.py`, `discover.py`,
+   `companies.txt` and `config.json`, e.g. from the unzipped folder in the Files app. Then tap **Commit changes**.
+4. **Create the daily job:** tap **Add file → Create new file**, name it exactly `.github/workflows/daily.yml`, paste the
+   contents of `daily.yml` (shown below), and commit.
+5. **Secrets:** go to **Settings → Secrets and variables → Actions → New repository secret** and add two:
+   - `SEC_CONTACT_EMAIL`: your email. SEC requires one to identify who's requesting data; it's sent only to sec.gov.
+   - `NTFY_TOPIC`: your topic name from step 1
+6. **First run:** go to **Actions → Daily company check → Run workflow**. It takes about 2 minutes, and you'll get a push.
+7. **Dashboard:** go to **Settings → Pages**, set Source to *Deploy from a branch*, branch `main`, folder `/docs`, and save.
+   About a minute later open `https://<your-username>.github.io/pulse/` in Safari and tap **Share → Add to Home Screen**.
+
+### Private repo instead? (dashboard on Cloudflare Pages, also free)
+
+GitHub Pages is not free for private repos, so in step 2 choose **Private** and replace step 7 with:
+
+7. Create a free account at **dash.cloudflare.com** and go to **Workers & Pages → Create → Pages → Connect to Git**.
+   Authorize GitHub (only for this repo), select the repo, leave the **build command empty**, set **build output directory** to `docs`, and deploy.
+   You get a URL like `https://pulse-abc.pages.dev`. Open it in Safari and tap **Share → Add to Home Screen**.
+8. In GitHub, go to **Settings → Secrets and variables → Actions → Variables → New repository variable**: name `DASHBOARD_URL`,
+   value set to your `pages.dev` URL. Tapping a notification then opens the dashboard.
+
+Cloudflare republishes automatically after each daily run. The `pages.dev` address is reachable by anyone who knows it,
+but it isn't linked anywhere. To put a login on it, add **Cloudflare Access** (Zero Trust, free for up to 50 users) with an
+email one-time-PIN rule for your own address.
+
+The first run records each company's starting point. "New on radar", "Biggest improvers" and change alerts start from the second day.
+
+<details><summary>Contents of .github/workflows/daily.yml</summary>
+
+```yaml
+name: Daily company check
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # every day 06:00 UTC (07:00/08:00 Belgian time)
+  workflow_dispatch:       # "Run workflow" button for a manual run
+  push:
+    paths: [companies.txt, config.json]   # re-run right after you edit your list
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run CompanyPulse
+        env:
+          SEC_CONTACT_EMAIL: ${{ secrets.SEC_CONTACT_EMAIL }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          # set a repository variable DASHBOARD_URL if the dashboard isn't on GitHub Pages (e.g. Cloudflare Pages)
+          DASHBOARD_URL: ${{ vars.DASHBOARD_URL || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
+        run: python pulse.py
+      - name: Save dashboard and state
+        run: |
+          git config user.name "companypulse-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add docs
+          git diff --cached --quiet || git commit -m "Daily update $(date -u +%F)"
+          git push
+```
+</details>
+
+## Daily use (all from your phone)
+
+- **Watchlist:** edit `companies.txt` on github.com. Each card in the dashboard also has an "Add to watchlist" link.
+- **Settings:** edit `config.json`:
+  - `discovery_min_score` sets the score needed to be "on your radar" (default 75)
+  - `discovery_min_revenue` filters out small companies (default $100M)
+  - `notify_discoveries`, `daily_summary`, `notify_positive` and `notify_negative` switch notifications on or off
+  - set `"discovery_exchanges": ["Nasdaq", "NYSE", "OTC"]` to include over-the-counter stocks
+- **Change the time:** edit the `cron` line in `.github/workflows/daily.yml`.
+
+## Limits
+
+- Data comes from the SEC, so coverage is US-listed companies, including foreign companies with a US listing such as ASML and NVO
+  (watchlist only for those). Companies listed only in Europe are not available.
+- The market-wide screen uses the SEC's yearly and quarterly snapshots, so it's a bit less detailed than the watchlist analysis.
+  For banks and brokers, cash flow figures are ignored because customer money distorts them.
+- Financial results change roughly every quarter. Most new radar entries show up during earnings seasons (Feb, May, Aug, Nov).
+- Scores are rule-based heuristics to help you find companies worth a closer look. They are not investment advice.
