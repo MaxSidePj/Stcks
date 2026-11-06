@@ -26,8 +26,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-DOCS = ROOT / "docs"
-STATE_FILE = DOCS / "state.json"
+SITE = ROOT / "site"                    # dashboard, published by the workflow (not committed)
+STATE_FILE = ROOT / "state" / "state.json"  # small memory between runs (committed)
+LEGACY_STATE = ROOT / "docs" / "state.json"
 
 # --------------------------------------------------------------------------- config
 
@@ -51,13 +52,19 @@ def load_config() -> dict:
     return defaults
 
 
-def load_tickers() -> list[str]:
-    tickers = []
+def load_tickers() -> list[tuple[str, str]]:
+    """Lines like `AAPL`, or for European stocks `ABI.BR = Anheuser-Busch` (name or LEI after '=')."""
+    out, seen = [], set()
     for line in (ROOT / "companies.txt").read_text(encoding="utf-8").splitlines():
-        t = line.split("#", 1)[0].strip().upper()
-        if t and t not in tickers:
-            tickers.append(t)
-    return tickers
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        t, _, hint = line.partition("=")
+        t = t.strip().upper()
+        if t and t not in seen:
+            seen.add(t)
+            out.append((t, hint.strip()))
+    return out
 
 # --------------------------------------------------------------------------- SEC
 
@@ -119,6 +126,10 @@ DEBT = C("us-gaap:LongTermDebt", "us-gaap:LongTermDebtNoncurrent",
 EQUITY = C("us-gaap:StockholdersEquity", "us-gaap:StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
            "ifrs-full:EquityAttributableToOwnersOfParent", "ifrs-full:Equity")
 
+DIVIDENDS = C("us-gaap:PaymentsOfDividendsCommonStock", "us-gaap:PaymentsOfDividends",
+              "ifrs-full:DividendsPaidClassifiedAsFinancingActivities")
+BUYBACKS = C("us-gaap:PaymentsForRepurchaseOfCommonStock", "ifrs-full:PaymentsToAcquireOrRedeemEntitysShares")
+
 FORMS = {"10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "40-F/A"}
 ANNUAL_FORMS = {"10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"}
 
@@ -170,16 +181,20 @@ def lookup(s: dict[date, dict], end: date) -> float | None:
 
 def parse(raw: dict) -> dict:
     facts = raw.get("facts", {})
-    units = set()
+    latest: dict[str, str] = {}
     for tax, name in REVENUE + NETINC:
-        units |= set(facts.get(tax, {}).get(name, {}).get("units", {}).keys())
-    cur = "USD" if "USD" in units or not units else next((u for u in sorted(units) if len(u) == 3 and u.isupper()), "USD")
+        for unit, entries in facts.get(tax, {}).get(name, {}).get("units", {}).items():
+            if len(unit) == 3 and unit.isupper():
+                latest[unit] = max([latest.get(unit, "")] + [e.get("end", "") for e in entries])
+    # the reporting currency is the one with the most recent data; USD wins ties
+    cur = max(latest, key=lambda u: (latest[u], u == "USD")) if latest else "USD"
 
     revA, niA = series(facts, REVENUE, cur, "annual"), series(facts, NETINC, cur, "annual")
     gpA, opA = series(facts, GROSS, cur, "annual"), series(facts, OPINC, cur, "annual")
     shA = series(facts, SHARES, "shares", "annual")
     ocfA, capA = series(facts, OCF, cur, "annual"), series(facts, CAPEX, cur, "annual")
     cashI, debtI, eqI = (series(facts, x, cur, "instant") for x in (CASH, DEBT, EQUITY))
+    divA, bbA = series(facts, DIVIDENDS, cur, "annual"), series(facts, BUYBACKS, cur, "annual")
 
     annual = []
     for end in sorted(revA or niA)[-10:]:
@@ -188,7 +203,8 @@ def parse(raw: dict) -> dict:
              "revenue": lookup(revA, end), "net_income": lookup(niA, end),
              "gross_profit": lookup(gpA, end), "operating_income": lookup(opA, end),
              "shares": lookup(shA, end), "ocf": lookup(ocfA, end), "capex": lookup(capA, end),
-             "cash": lookup(cashI, end), "debt": lookup(debtI, end), "equity": lookup(eqI, end)}
+             "cash": lookup(cashI, end), "debt": lookup(debtI, end), "equity": lookup(eqI, end),
+             "dividends": lookup(divA, end), "buybacks": lookup(bbA, end)}
         p["fcf"] = p["ocf"] - abs(p["capex"] or 0) if p["ocf"] is not None else None
         annual.append(p)
 
@@ -534,50 +550,88 @@ li.pos b{color:var(--pos)}li.neg b{color:var(--neg)}li.warn b{color:var(--warn)}
 .empty{color:var(--mut);padding:20px 6px}
 """
 
+EXTRA_CSS = """
+.tabs{overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;gap:6px}.tabs::-webkit-scrollbar{display:none}
+.tabs button{flex:0 0 auto;padding:8px 14px;white-space:nowrap}
+.regions{display:flex;gap:6px;overflow-x:auto;margin:4px 0 10px}.regions button{border:0;border-radius:99px;padding:5px 12px;
+font:600 12px -apple-system,system-ui;background:var(--card);color:var(--mut)}.regions button.on{background:var(--fg);color:var(--bg)}
+.rank{font-weight:800;color:var(--mut);font-size:13px;min-width:22px}
+.status{font-size:11px;font-weight:800;padding:2px 8px;border-radius:99px;color:#fff;vertical-align:2px}
+.st-strong{background:#15803d}.st-buy{background:#22c55e}.st-watch{background:#d97706}.st-avoid{background:#9ca3af}.st-deal{background:#6366f1}
+.factors{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:12px 0}
+.factors div{background:var(--line);border-radius:10px;padding:6px;text-align:center}.factors small{display:block;font-size:11px;color:var(--mut)}
+.factors b{font-size:16px}
+.why li{padding:4px 0 4px 18px;position:relative;font-size:14px}.why li:before{content:"✓";position:absolute;left:0;color:var(--pos)}
+.risk li{padding:4px 0 4px 18px;position:relative;font-size:14px}.risk li:before{content:"!";position:absolute;left:3px;color:var(--warn);font-weight:800}
+.news li{padding:6px 0;border-bottom:1px solid var(--line);font-size:13px}.news li:last-child{border:0}.news time{color:var(--mut);font-size:11px}
+.flag{font-size:10px;font-weight:700;padding:1px 6px;border-radius:99px;margin-left:4px}
+.flag.deal{background:#6366f1;color:#fff}.flag.neg{background:var(--neg);color:#fff}.flag.pos{background:var(--pos);color:#fff}
+.links{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}.links a{background:var(--line);border-radius:99px;padding:5px 11px;font-size:13px;text-decoration:none}
+.dca{border-radius:12px;padding:10px 12px;margin-top:12px;background:var(--line)}
+.dca b{display:block;font-size:16px}.dca span{font-size:13px;color:var(--mut)}
+.dca.strong{background:rgba(22,163,74,.15)}.dca.weak{background:rgba(220,38,38,.12)}.dca.mixed{background:rgba(217,119,6,.12)}
+.overview{background:var(--card);border-radius:14px;padding:4px 14px;margin-bottom:10px}
+.overview div{display:flex;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid var(--line);font-size:14px}
+.overview div:last-child{border:0}.overview b{width:70px}.overview .grow{flex:1;color:var(--mut);font-size:13px}
+.method{background:var(--card);border-radius:14px;padding:4px 16px 14px;font-size:14px}.method h3{margin-top:18px}
+.method table{width:100%;border-collapse:collapse;font-size:13px}.method td{padding:5px 4px;border-bottom:1px solid var(--line);vertical-align:top}
+"""
+
 JS = r"""
 const $=s=>document.querySelector(s);
-function tab(t){document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('on',b.dataset.t===t));
- document.querySelectorAll('main>section').forEach(s=>s.hidden=s.id!==t);history.replaceState(null,'','#'+t);
+function tab(t){if(!document.getElementById(t))t=document.querySelector('.tabs button').dataset.t;
+ document.querySelectorAll('.tabs button').forEach(b=>{b.classList.toggle('on',b.dataset.t===t);if(b.dataset.t===t)b.scrollIntoView({inline:'center',block:'nearest'});});
+ document.querySelectorAll('main>section').forEach(s=>s.hidden=s.id!==t);history.replaceState(null,'','#'+t);window.scrollTo(0,0);
  if(t==='all')loadAll();}
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>tab(b.dataset.t));
+document.querySelectorAll('.regions').forEach(bar=>bar.querySelectorAll('button').forEach(b=>b.onclick=()=>{
+ bar.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));const r=b.dataset.r;
+ bar.parentElement.querySelectorAll('details.card').forEach(c=>c.hidden=r!=='All'&&c.dataset.region!==r);}));
 let U=null;
 async function loadAll(){if(U)return;$('#list').innerHTML='<p class="empty">Loading…</p>';
- U=await (await fetch('universe.json')).json();draw();}
+ U=await (await fetch('universe.json')).json();
+ const secs=[...new Set(U.rows.map(r=>r[13]))].sort();
+ $('#sec').innerHTML='<option value="">All sectors</option>'+secs.map(s=>`<option>${esc(s)}</option>`).join('');draw();}
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const pct=(v,s)=>v==null?'–':(s&&v>0?'+':'')+(v*100).toFixed(1)+'%';
 const cls=v=>v==null?'':v>0.005?'up':v<-0.005?'down':'';
 const sc=s=>s>=70?'strong':s>=55?'healthy':s>=40?'mixed':'weak';
+const vc=l=>l==='Attractive'?'up':l==='Expensive'?'down':'';
+const stc={'Strong buy':'st-strong','Buy':'st-buy','Watch':'st-watch','Avoid':'st-avoid','Deal pending':'st-deal'};
 function money(v){if(v==null)return'–';const a=Math.abs(v),g=v<0?'-$':'$';
  return a>=1e12?g+(a/1e12).toFixed(2)+'T':a>=1e9?g+(a/1e9).toFixed(2)+'B':g+(a/1e6).toFixed(0)+'M';}
 function num(id,div){const v=$(id).value;return v===''?-Infinity:+v/div;}
 function row(r){
  const sigs=r[12].map(i=>`<li class="${U.sig[i][0]}"><b>${esc(U.sig[i][1])}</b></li>`).join('')||'<li>No notable signals.</li>';
- return `<details class="card"><summary><div class="ring ${sc(r[3])}" style="--p:${r[3]}"><span>${r[3]}</span></div>
- <div class="who"><div><b>${esc(r[0])}</b> <small class="inl">${r[2]} · ${money(r[4])} revenue</small></div><small>${esc(r[1])}</small>
- <div class="chips"><span class="chip ${cls(r[5])}">Rev ${pct(r[5],1)}</span><span class="chip ${cls(r[9])}">FCF ${pct(r[9])}</span>
- <span class="chip ${cls(r[8])}">Net ${pct(r[8])}</span>${r[7]!=null?`<span class="chip ${cls(r[7])}">Qtr ${pct(r[7],1)}</span>`:''}</div></div></summary>
- <div class="body"><ul class="sigs">${sigs}</ul><div class="grid" style="margin-top:8px">
- <div><small>3-yr CAGR</small><b class="${cls(r[6])}">${pct(r[6],1)}</b></div><div><small>ROE</small><b>${pct(r[10])}</b></div>
- <div><small>Debt / equity</small><b>${r[11]==null?'–':r[11].toFixed(2)+'×'}</b></div><div><small>FCF margin</small><b>${pct(r[9])}</b></div></div>
- ${U.edit?`<p class="foot"><a href="${U.edit}">＋ Add to watchlist</a> (adds a full deep-dive)</p>`:''}</div></details>`;}
-function draw(){if(!U)return;const q=$('#q').value.trim().toLowerCase(),ms=num('#ms',1),mg=num('#mg',100),mf=num('#mf',100);
- const i={score:3,growth:5,cagr:6,qg:7,fcf:9,roe:10,rev:4}[$('#sort').value];
- const rows=U.rows.filter(r=>r[3]>=ms&&(r[5]??-Infinity)>=mg&&(r[9]??-Infinity)>=mf&&(!q||r[0].toLowerCase().includes(q)||r[1].toLowerCase().includes(q)))
-  .sort((a,b)=>(b[i]??-1e18)-(a[i]??-1e18));
+ return `<details class="card"><summary><div class="ring ${sc(r[21])}" style="--p:${r[21]}"><span>${r[21]}</span></div>
+ <div class="who"><div><b>${esc(r[0])}</b> ${r[22]?`<span class="status ${stc[r[22]]}">${r[22]}</span>`:''} ${r[16]?`<em class="${vc(r[16])}">${r[16]}</em>`:''}
+ <small class="inl">${esc(r[20])} · ${esc(r[13])} · ${money(r[18])}</small></div><small>${esc(r[1])}</small>
+ <div class="chips"><span class="chip">Health ${r[3]}</span><span class="chip ${cls(r[5])}">Rev ${pct(r[5],1)}</span>
+ ${r[7]!=null?`<span class="chip ${cls(r[7])}">Qtr ${pct(r[7],1)}</span>`:''}${r[15]!=null?`<span class="chip ${cls(r[15])}">FCF yld ${pct(r[15])}</span>`:''}
+ ${r[14]!=null?`<span class="chip">P/E ${r[14].toFixed(1)}</span>`:''}${r[24]!=null?`<span class="chip">Mom ${r[24]}</span>`:''}</div></div></summary>
+ <div class="body"><p class="foot">${r[22]?'Fully analysed (on the shortlist).':'Preliminary buy score: price trend and news not checked (not on today\'s shortlist).'} Style: ${esc(r[23]||'–')}</p>
+ <ul class="sigs">${sigs}</ul><div class="grid" style="margin-top:8px">
+ <div><small>Net margin</small><b>${pct(r[8])}</b></div><div><small>3-yr CAGR</small><b class="${cls(r[6])}">${pct(r[6],1)}</b></div>
+ <div><small>FCF margin</small><b>${pct(r[9])}</b></div><div><small>ROE</small><b>${pct(r[10])}</b></div>
+ <div><small>Debt / equity</small><b>${r[11]==null?'–':r[11].toFixed(2)+'×'}</b></div><div><small>Shareholder yield</small><b>${pct(r[19])}</b></div></div>
+ <div class="links"><a href="https://news.google.com/search?q=${encodeURIComponent(r[0]+' stock')}">News</a>
+ <a href="https://www.google.com/finance/quote/${encodeURIComponent(r[0])}:${r[2]==='Nasdaq'?'NASDAQ':'NYSE'}">Chart</a>
+ ${U.edit?`<a href="${U.edit}">＋ Watchlist</a>`:''}</div></div></details>`;}
+function draw(){if(!U)return;const q=$('#q').value.trim().toLowerCase(),ms=num('#ms',1),mg=num('#mg',100),mb=num('#mb',1),
+ sec=$('#sec').value,val=$('#val').value,reg=$('#reg').value,key=$('#sort').value;
+ const i={buy:21,score:3,growth:5,cagr:6,qg:7,fcf:9,fy:15,shy:19,roe:10,mcap:18,mom:24}[key];
+ const rows=U.rows.filter(r=>r[3]>=ms&&r[21]>=mb&&(r[5]??-Infinity)>=mg&&(!sec||r[13]===sec)&&(!reg||r[20]===reg)
+  &&(!val||(val==='A'?r[16]==='Attractive':r[16]&&r[16]!=='Expensive'))
+  &&(!q||r[0].toLowerCase().includes(q)||r[1].toLowerCase().includes(q)))
+  .sort(key==='pe'?(a,b)=>(a[14]??1e9)-(b[14]??1e9):(a,b)=>(b[i]??-1e18)-(a[i]??-1e18));
  $('#cnt').textContent=`${rows.length} of ${U.rows.length} companies`+(rows.length>150?' · showing top 150':'');
  $('#list').innerHTML=rows.slice(0,150).map(row).join('')||'<p class="empty">No matches.</p>';}
-['#q','#ms','#mg','#mf','#sort'].forEach(id=>$(id).addEventListener('input',draw));
+['#q','#ms','#mg','#mb','#sec','#val','#reg','#sort'].forEach(id=>$(id).addEventListener('input',draw));
 tab(location.hash.slice(1)||document.querySelector('.tabs button').dataset.t);
 """
 
-DISCOVERY_SECTIONS = [
-    ("rising", "Biggest improvers", "Health score up 10+ points since the last check.", 25),
-    ("radar", "Top ranked", "Highest health scores across the market.", 40),
-    ("fast", "Fast growers", "Revenue +25% or more, profitable, and free cash flow positive.", 25),
-    ("accel", "Growth accelerating", "Latest quarter grew faster than the quarter before.", 25),
-    ("cash", "Cash machines", "Free cash flow of 25%+ of revenue and still growing.", 25),
-    ("turn", "Turnarounds", "Turned profitable this year, with revenue growing.", 20),
-]
+STATUS_CLASS = {"Strong buy": "st-strong", "Buy": "st-buy", "Watch": "st-watch", "Avoid": "st-avoid", "Deal pending": "st-deal"}
+DCA_CLASS = {"Buy extra": "strong", "DCA as usual": "healthy", "Hold": "mixed", "Wait": "mixed", "Review": "weak"}
 
 
 def edit_url() -> str:
@@ -585,18 +639,109 @@ def edit_url() -> str:
     return f"https://github.com/{repo}/edit/main/companies.txt" if repo else ""
 
 
-def card_html(c: dict, badge: str = "") -> str:
+def num(v, digits=1):
+    return "–" if v is None or not math.isfinite(v) else f"{v:.{digits}f}"
+
+
+def val_class(label):
+    return "up" if label == "Attractive" else "down" if label == "Expensive" else ""
+
+
+def status_badge(rk):
+    return f'<span class="status {STATUS_CLASS.get(rk["status"], "")}">{rk["status"]}</span>' if rk else ""
+
+
+def short_name(name: str) -> str:
+    words = [w for w in name.replace(",", " ").split()
+             if w.lower().strip(".") not in {"inc", "corp", "corporation", "co", "ltd", "limited", "plc", "sa", "nv", "n.v",
+                                              "ag", "se", "holdings", "holding", "group", "company", "the", "/de/", "/new/",
+                                              "class", "a", "adr", "s.a", "spa", "lp", "l.p"}]
+    return " ".join(words[:3]) or name
+
+
+def card_html(c: dict, badge: str = "", rank: int | None = None) -> str:
     e = html.escape
     a, f, m, cur = c["analysis"], c["fin"], c["analysis"]["metrics"], c["fin"]["currency"]
-    chips = "".join(
-        f'<span class="chip {sign_class(v)}">{k} {pct(v, sgn)}</span>'
-        for k, v, sgn in (("Rev", m.get("revenue_growth"), True), ("FCF", m.get("fcf_margin"), False),
-                          ("Net", m.get("net_margin"), False)))
-    if m.get("q_growth") is not None:
-        chips += f'<span class="chip {sign_class(m["q_growth"])}">Qtr {pct(m["q_growth"], True)}</span>'
+    val, tech, dca, rk, ev = c.get("val") or {}, c.get("tech") or {}, c.get("dca"), c.get("rank"), c.get("ev") or {}
+    ring = rk["score"] if rk else a["score"]
+
+    chips = f'<span class="chip">Health {a["score"]}</span>' if rk else ""
+    chips += "".join(f'<span class="chip {sign_class(v)}">{k} {pct(v, sgn)}</span>'
+                     for k, v, sgn in (("Rev", m.get("revenue_growth"), True), ("Qtr", m.get("q_growth"), True))
+                     if v is not None)
+    if val.get("fcf_yield") is not None:
+        chips += f'<span class="chip {sign_class(val["fcf_yield"])}">FCF yld {pct(val["fcf_yield"])}</span>'
+    if val.get("pe"):
+        chips += f'<span class="chip">P/E {val["pe"]:.1f}</span>'
+    if tech.get("ret_6m") is not None:
+        chips += f'<span class="chip {sign_class(tech["ret_6m"])}">6m {pct(tech["ret_6m"], True)}</span>'
+    if (ev.get("insiders") or {}).get("value", 0) >= 100_000:
+        chips += '<span class="chip up">Insider buying</span>'
+    if ev.get("red_flags"):
+        chips += '<span class="chip down">Red flag</span>'
+    news_flags = {fl for n in ev.get("news", []) for fl in n.get("flags", [])}
+    if "deal" in news_flags or ev.get("takeover"):
+        chips += '<span class="chip">M&amp;A news</span>'
+    if "neg" in news_flags:
+        chips += '<span class="chip down">Check news</span>'
+
+    blocks = ""
+    if rk:
+        blocks += ('<div class="factors">' + "".join(
+            f'<div><small>{k}</small><b class="{score_class(v) if v is not None else ""}">{"–" if v is None else v}</b></div>'
+            for k, v in (("Quality", rk["q"]), ("Value", rk["v"]), ("Growth", rk["g"]), ("Momentum", rk["m"]))) + "</div>")
+        blocks += f'<p class="foot">Style: <b>{rk["style"]}</b> · Buy score {rk["score"]}/100</p>'
+        if rk["why"]:
+            blocks += '<h3>Why it ranks</h3><ul class="why">' + "".join(f"<li>{e(x)}</li>" for x in rk["why"]) + "</ul>"
+        if rk["risks"]:
+            blocks += '<h3>Risks to check</h3><ul class="risk">' + "".join(f"<li>{e(x)}</li>" for x in rk["risks"]) + "</ul>"
+    if dca and c.get("in_watchlist"):
+        blocks += f'<div class="dca {DCA_CLASS.get(dca[0], "")}"><b>DCA: {dca[0]}</b><span>{e(dca[1])}</span></div>'
+    if tech:
+        pc = tech.get("currency", "USD")
+        tgrid = [("Price", money(tech["price"], pc), None), ("Today", pct(tech.get("day_pct"), True), tech.get("day_pct")),
+                 ("3 months", pct(tech.get("ret_3m"), True), tech.get("ret_3m")), ("6 months", pct(tech.get("ret_6m"), True), tech.get("ret_6m")),
+                 ("12 months", pct(tech.get("ret_12m"), True), tech.get("ret_12m")), ("From 52w high", pct(tech.get("drawdown")), tech.get("drawdown")),
+                 ("vs 200-day avg", pct(tech.get("vs_ma200"), True), tech.get("vs_ma200")), ("RSI (14d)", num(tech.get("rsi"), 0), None)]
+        blocks += '<h3>Price &amp; trend</h3><div class="grid">' + "".join(
+            f'<div><small>{k}</small><b class="{sign_class(t)}">{v}</b></div>' for k, v, t in tgrid) + "</div>"
+    if val and val.get("label"):
+        sp = f' <small class="inl">(sector {val["sector_pe"]:.1f})</small>' if val.get("sector_pe") else ""
+        vgrid = [("Market value", money(val.get("mcap"), cur), ""), ("Valuation", val.get("label", "–"), val_class(val.get("label"))),
+                 ("P/E", num(val.get("pe")) + sp, ""), ("PEG", num(val.get("peg"), 2), ""),
+                 ("FCF yield", pct(val.get("fcf_yield")), sign_class(val.get("fcf_yield"))), ("Price / sales", num(val.get("ps")), ""),
+                 ("Dividend yield", pct(val.get("div_yield")), ""), ("Shareholder yield", pct(val.get("shareholder_yield")), "")]
+        blocks += '<h3>Valuation</h3><div class="grid">' + "".join(
+            f'<div><small>{k}</small><b class="{kc}">{v}</b></div>' for k, v, kc in vgrid) + "</div>"
+    elif c.get("region_src") == "EU-only":
+        blocks += ('<p class="foot">No free price feed for European exchanges, so there is no valuation or price trend. '
+                   'If the company also trades in the US (e.g. ASML, NVO, SAP), add the US ticker for the full analysis.</p>')
+
+    evs = ""
+    if ev.get("takeover"):
+        t = ev["takeover"]
+        evs += f'<li><time>{t["date"]}</time> <a href="{t["url"]}">Takeover / merger filing ({e(t["form"])})</a><span class="flag deal">M&amp;A</span></li>'
+    for rf in ev.get("red_flags", []):
+        evs += f'<li><time>{rf["date"]}</time> <a href="{rf["url"]}">{e(rf["text"])}</a><span class="flag neg">red flag</span></li>'
+    ins = ev.get("insiders") or {}
+    if ins.get("value", 0) > 0:
+        evs += f'<li>Insider open-market buys last 90 days: ${ins["value"] / 1e6:.2f}M by {e(", ".join(ins["buyers"][:4]))}<span class="flag pos">insiders</span></li>'
+    if ev.get("activist"):
+        evs += f'<li><time>{ev["activist"]["date"]}</time> <a href="{ev["activist"]["url"]}">Large / activist stake filed ({ev["activist"]["form"]})</a></li>'
+    for x in ev.get("events", [])[:5]:
+        evs += f'<li><time>{x["date"]}</time> <a href="{x["url"]}">{e(x["text"])}</a></li>'
+    if evs:
+        blocks += f'<h3>Company events (SEC filings)</h3><ul class="news">{evs}</ul>'
+    if ev.get("news"):
+        items = "".join(
+            f'<li><time>{n["date"]}</time> <a href="{e(n["url"])}">{e(n["title"])}</a>'
+            + "".join(f'<span class="flag {fl}">{ {"deal": "M&amp;A", "neg": "negative", "pos": "positive"}[fl] }</span>' for fl in n["flags"])
+            + "</li>" for n in ev["news"])
+        blocks += f'<h3>Latest news</h3><ul class="news">{items}</ul>'
+
     sigs = "".join(
         f'<li class="{s["tone"]}"><b>{TONE_ICON[s["tone"]]} {e(s["title"])}</b><span>{e(s["detail"])}</span></li>'
-        for s in a["signals"]) or "<li>No notable signals.</li>"
+        for s in a["signals"] + val.get("signals", [])) or "<li>No notable signals.</li>"
     metrics = [
         ("Revenue", money(m.get("revenue"), cur), None), ("Revenue growth", pct(m.get("revenue_growth"), True), m.get("revenue_growth")),
         ("3-yr CAGR", pct(m.get("cagr3"), True), m.get("cagr3")), ("Latest qtr YoY", pct(m.get("q_growth"), True), m.get("q_growth")),
@@ -613,98 +758,192 @@ def card_html(c: dict, badge: str = "") -> str:
     quarters = [q for q in f["quarterly"][-8:] if q.get("revenue") is not None]
     q_chart = bar_svg([(f"Q{(q['end'].month - 1) // 3 + 1}'{str(q['end'].year)[2:]}", q["revenue"], None)
                        for q in quarters], cur) if len(quarters) > 1 else ""
-    filing = f.get("filing")
-    foot = [f'Latest filing: {filing["form"]} filed {filing["filed"]}'] if filing else []
-    foot.append(f'<a href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={c["cik"]:010d}&type=10-&owner=include&count=40">SEC filings</a>')
-    if c.get("exchange") and edit_url():
-        foot.append(f'<a href="{edit_url()}">＋ Add to watchlist</a>')
-    sub = f'<small class="inl">{c["exchange"]} · {money(m.get("revenue"), cur)} revenue</small>' if c.get("exchange") else ""
+
+    links = [f'<a href="{ev.get("news_link") or events_mod().news_link(short_name(c["name"]))}">News</a>']
+    if c.get("exchange"):
+        links.append(f'<a href="https://www.google.com/finance/quote/{e(c["ticker"])}:{"NASDAQ" if c["exchange"] == "Nasdaq" else "NYSE"}">Chart</a>')
+    if c.get("cik"):
+        links.append(f'<a href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={c["cik"]:010d}&owner=include&count=40">SEC filings</a>')
+    if c.get("region_src") == "EU-only":
+        links.append('<a href="https://filings.xbrl.org/">EU annual reports</a>')
+    if c.get("exchange") and edit_url() and not c.get("in_watchlist"):
+        links.append(f'<a href="{edit_url()}">＋ Watchlist</a>')
+
+    sub_parts = [x for x in (c.get("region"), c.get("sector") if c.get("sector") not in (None, "Other") else None,
+                             money((c.get("market") or {}).get("mcap"), "USD") if (c.get("market") or {}).get("mcap") else None) if x]
+    sub = f'<small class="inl">{e(" · ".join(sub_parts))}</small>' if sub_parts else ""
+    vlabel = f'<em class="{val_class(val["label"])}">{val["label"]}</em>' if val.get("label") else ""
+    rank_html = f'<span class="rank">#{rank}</span>' if rank else ""
     return f"""
-<details class="card">
-  <summary>
-    <div class="ring {score_class(a['score'])}" style="--p:{a['score']}"><span>{a['score']}</span></div>
-    <div class="who"><div><b>{e(c['ticker'])}</b> {badge} <em class="{score_class(a['score'])}">{a['rating']}</em> {sub}</div>
+<details class="card" data-region="{e(c.get('region') or 'Other')}">
+  <summary>{rank_html}
+    <div class="ring {score_class(ring)}" style="--p:{ring}"><span>{ring}</span></div>
+    <div class="who"><div><b>{e(c['ticker'])}</b> {badge} {status_badge(rk)} {vlabel} {sub}</div>
       <small>{e(c['name'])}</small><div class="chips">{chips}</div></div>
-    {spark_svg([y['revenue'] for y in f['annual'][-5:]])}
   </summary>
   <div class="body">
-    <h3>Signals</h3><ul class="sigs">{sigs}</ul>
+    {blocks}
+    <h3>Business signals</h3><ul class="sigs">{sigs}</ul>
     <h3>Key metrics · latest fiscal year</h3><div class="grid">{grid}</div>
     <h3>Revenue <i class="dot rev"></i> &amp; free cash flow <i class="dot fcf"></i></h3>{annual_chart}
     {'<h3>Quarterly revenue</h3>' + q_chart if q_chart else ''}
-    <p class="foot">{' · '.join(foot)}</p>
+    <div class="links">{''.join(links)}</div>
   </div>
 </details>"""
 
 
-def render(watch: list[dict], disc: dict, new_radar: list[dict], universe_n: int,
-           alerts: list[dict], errors: list[str], generated: str, cfg: dict) -> str:
+def events_mod():
+    import events
+    return events
+
+
+REGION_BAR = ('<div class="regions">' + "".join(f'<button data-r="{r}"{" class=on" if r == "All" else ""}>{r}</button>'
+                                               for r in ("All", "US", "Europe", "Asia", "Other")) + "</div>")
+
+METHOD_HTML = """
+<div class="method">
+<h3>How a company gets its Buy score</h3>
+<p>Every day, about 2,000-4,000 companies listed in the US are scored on business quality and valuation. That includes
+European and Asian companies with a US listing. The best ~200 (the shortlist) also get a price-trend check, insider and
+corporate-event checks, and a news scan. Your watchlist always gets everything.</p>
+<table>
+<tr><td><b>Quality</b></td><td>Health score 0-100: revenue growth (1 and 3 years), margins and their trend, free cash flow, cash conversion,
+return on equity, debt, net cash and share dilution.</td></tr>
+<tr><td><b>Value</b></td><td>Free-cash-flow yield, P/E vs sector median, PEG (P/E ÷ growth, growth capped at 25%) and shareholder yield
+(dividends + buybacks). Labelled Attractive, Fair or Expensive.</td></tr>
+<tr><td><b>Growth</b></td><td>Revenue growth, with a bonus when the latest quarter is accelerating and a penalty for growth funded by cash burn.</td></tr>
+<tr><td><b>Momentum</b></td><td>6- and 12-month price return, price vs 50/200-day averages, with a penalty when overheated (RSI above 78 or far above trend).</td></tr>
+</table>
+<h3>Two investing styles</h3>
+<table>
+<tr><td><b>Quality value</b></td><td>40% quality, 35% value, 10% growth, 15% momentum. Great businesses at fair prices.</td></tr>
+<tr><td><b>Growth momentum</b></td><td>20% quality, 10% value, 40% growth, 30% momentum. Fast growers the market is already rewarding,
+the kind of profile early winners often show.</td></tr>
+</table>
+<p>The Buy score is the better of the two, adjusted for:</p>
+<ul class="why">
+<li>Insiders buying shares on the open market with their own money (+3 to +6)</li>
+<li>A large or activist stake filed (+2)</li>
+</ul>
+<ul class="risk">
+<li>Negative headlines (-4)</li>
+<li>Red flags: restatement, bankruptcy, delisting notice or auditor change cap the score at 45</li>
+<li>Weak fundamentals (health below 35) cap the score at 60</li>
+<li>A pending takeover gets the status "Deal pending", because the price is tied to the deal</li>
+</ul>
+<h3>Statuses</h3>
+<table>
+<tr><td><span class="status st-strong">Strong buy</span></td><td>78+: top on several factors at once</td></tr>
+<tr><td><span class="status st-buy">Buy</span></td><td>68-77</td></tr>
+<tr><td><span class="status st-watch">Watch</span></td><td>55-67: interesting, but something is missing (price, trend or quality)</td></tr>
+<tr><td><span class="status st-avoid">Avoid</span></td><td>below 55, or red flags</td></tr>
+</table>
+<h3>DCA actions (watchlist)</h3>
+<p><b>Buy extra</b>: quality 70+, not expensive, and temporarily down (15%+ below the high, under the 200-day average, or oversold).
+<b>DCA as usual</b>: healthy and fairly priced. <b>Hold</b>: average quality or a high price. <b>Wait</b>: expensive and stretched.
+<b>Review</b>: weak fundamentals.</p>
+<h3>Data and limits</h3>
+<p>Financials: SEC EDGAR (10-K, 10-Q, 20-F, 40-F), plus EU annual reports (ESEF) for European watchlist stocks.
+Prices: Nasdaq end-of-day and current price. FX: ECB. Events: SEC 8-K/6-K, Form 4, SC 13D, SC TO and merger proxies. News: Google News.
+Stocks listed only in Europe or Asia (no US listing) have no free price feed: they get a quality score only.
+Momentum for companies outside the shortlist builds up automatically from the app's own daily price history.
+These are rule-based signals to find companies worth researching. They are not investment advice: always read the latest results and news before you buy.</p>
+</div>"""
+
+
+def list_section(items: list[dict], intro: str, cap: int) -> str:
+    if not items:
+        return '<p class="empty">Nothing here yet. The full analysis appears after the first run.</p>'
+    return (f'<p class="desc">{intro}</p>{REGION_BAR}' +
+            "".join(card_html(c, rank=i + 1) for i, c in enumerate(items[:cap])))
+
+
+def render(ctx: dict) -> str:
     e = html.escape
+    cfg = ctx["cfg"]
+    ranked = ctx["ranked"]
+    top = [c for c in ranked if c["rank"]["status"] in ("Strong buy", "Buy", "Watch")]
+    growth = sorted([c for c in ranked if c["rank"]["style"] == "Growth momentum" and c["rank"]["status"] != "Deal pending"],
+                    key=lambda c: -c["rank"]["score"])
+    value = sorted([c for c in ranked if c["rank"]["style"] == "Quality value" and c["rank"]["status"] != "Deal pending"],
+                   key=lambda c: -c["rank"]["score"])
 
-    # --- Discover tab
-    parts = []
-    if new_radar:
-        parts.append('<h2>New on your radar</h2><p class="desc">Crossed a health score of '
-                     f'{cfg.get("discovery_min_score", 75)} since the last check.</p>')
-        parts += [card_html(c, '<span class="badge">NEW</span>') for c in new_radar[:30]]
-    for key, title, desc, cap in DISCOVERY_SECTIONS:
-        items = disc.get(key) or []
-        if not items:
-            continue
-        parts.append(f'<h2>{title} · {len(items)}</h2><p class="desc">{desc}'
-                     f'{f" Showing top {cap}; see Explore all for the rest." if len(items) > cap else ""}</p>')
-        for c in items[:cap]:
-            badge = f'<span class="badge">+{c["analysis"]["score"] - c["prev_score"]}</span>' if key == "rising" else ""
-            parts.append(card_html(c, badge))
-    discover_html = "".join(parts) or '<p class="empty">Discovery data not available yet.</p>'
+    tabs = {}
+    tabs["top"] = ("🏆 Top", list_section(
+        top, "Best overall Buy scores today across all factors (quality, value, growth, momentum, events). "
+             "Tap a company for the reasons, risks and news.", cfg.get("top_count", 50)))
+    tabs["growth"] = ("🚀 Growth", list_section(
+        growth, "Growth momentum: fast-growing companies whose price trend confirms the story. Higher potential, higher risk.", 30))
+    tabs["value"] = ("💎 Value", list_section(
+        value, "Quality value: strong businesses at reasonable prices. The steadiest compounders.", 30))
 
-    # --- Watchlist tab
-    watch_html = "".join(card_html(c) for c in sorted(watch, key=lambda c: -c["analysis"]["score"])) \
-        or '<p class="empty">Your watchlist is empty. Add tickers to companies.txt.</p>'
+    watch = ctx["watch"]
+    order = ["Buy extra", "DCA as usual", "Hold", "Wait", "Review", None]
+    ws = sorted(watch, key=lambda c: (order.index(c["dca"][0] if c.get("dca") else None),
+                                      -(c["rank"]["score"] if c.get("rank") else 0)))
+    rows = ""
+    for c in ws:
+        label = (c.get("val") or {}).get("label") or "no price data"
+        dca = f'<span class="badge">DCA: {c["dca"][0]}</span>' if c.get("dca") else ""
+        rows += f'<div><b>{e(c["ticker"])}</b>{status_badge(c.get("rank"))}<span class="grow">{label}</span>{dca}</div>' 
+    wh = (f'<p class="desc">Your companies: Buy-score status, valuation and suggested DCA action.</p><div class="overview">{rows}</div>'
+          + "".join(card_html(c) for c in ws)) if ws else '<p class="empty">Add tickers to companies.txt.</p>'
     if edit_url():
-        watch_html += f'<p class="foot"><a href="{edit_url()}">Edit watchlist (companies.txt)</a></p>'
+        wh += f'<div class="links"><a href="{edit_url()}">Edit watchlist</a></div>'
+    tabs["watch"] = ("⭐ Watchlist", wh)
 
-    # --- Alerts tab
-    alert_items = "".join(
-        f'<li class="{x["tone"]}"><b>{TONE_ICON.get(x["tone"], "•")} {e(x["ticker"])} · {e(x["title"])}</b>'
-        f'<span>{e(x["body"])}</span><time>{x["date"][:10]}</time></li>' for x in alerts[:80])
-    alerts_html = f'<ul class="alerts">{alert_items}</ul>' if alert_items else \
-        '<p class="empty">No alerts yet. They appear from the second daily run onward.</p>'
-    if errors:
-        alerts_html += '<h2>Problems in last run</h2><ul class="err">' + "".join(f"<li>{e(x)}</li>" for x in errors) + "</ul>"
+    new_parts = []
+    if ctx["new_picks"]:
+        new_parts.append('<h2>New buy signals</h2><p class="desc">Became Strong buy or Buy since the last check.</p>')
+        new_parts += [card_html(c, '<span class="badge">NEW</span>') for c in ctx["new_picks"][:20]]
+    disc = ctx["disc"]
+    for key, title, desc in (("rising", "Biggest improvers", "Health score up 10+ points since the last check."),
+                             ("accel", "Growth accelerating", "Latest quarter grew faster than the one before. Often an early sign."),
+                             ("turn", "Turnarounds", "Turned profitable this year, with revenue growing."),
+                             ("fast", "Fast growers", "Revenue +25% or more, profitable and cash-generative.")):
+        items = disc.get(key) or []
+        if items:
+            new_parts.append(f'<h2>{title} · {len(items)}</h2><p class="desc">{desc}</p>')
+            new_parts += [card_html(c) for c in items[:12]]
+    tabs["new"] = ("🆕 New", "".join(new_parts) or '<p class="empty">New signals appear from the second run onward.</p>')
 
-    explore_html = """
+    tabs["all"] = ("🔎 Explore", """
 <div class="filters">
   <div class="full"><input id="q" placeholder="Search ticker or name" autocomplete="off"></div>
-  <div><label>Min score</label><input id="ms" type="number" inputmode="numeric" placeholder="any"></div>
+  <div><label>Region</label><select id="reg"><option value="">All</option><option>US</option><option>Europe</option><option>Asia</option><option>Other</option></select></div>
+  <div><label>Sector</label><select id="sec"></select></div>
+  <div><label>Valuation</label><select id="val"><option value="">Any</option><option value="A">Attractive</option><option value="F">Fair or attractive</option></select></div>
+  <div><label>Min buy score</label><input id="mb" type="number" inputmode="numeric" placeholder="any"></div>
+  <div><label>Min health score</label><input id="ms" type="number" inputmode="numeric" placeholder="any"></div>
   <div><label>Min revenue growth %</label><input id="mg" type="number" inputmode="numeric" placeholder="any"></div>
-  <div><label>Min FCF margin %</label><input id="mf" type="number" inputmode="numeric" placeholder="any"></div>
-  <div><label>Sort by</label><select id="sort"><option value="score">Health score</option><option value="growth">Revenue growth</option>
-  <option value="qg">Latest quarter growth</option><option value="cagr">3-yr CAGR</option><option value="fcf">FCF margin</option>
-  <option value="roe">Return on equity</option><option value="rev">Revenue size</option></select></div>
-</div><p class="desc" id="cnt"></p><div id="list"></div>"""
+  <div class="full"><label>Sort by</label><select id="sort"><option value="buy">Buy score</option><option value="score">Health score</option>
+  <option value="growth">Revenue growth</option><option value="qg">Latest quarter growth</option><option value="mom">Momentum</option>
+  <option value="fy">FCF yield</option><option value="pe">Lowest P/E</option><option value="cagr">3-yr CAGR</option>
+  <option value="fcf">FCF margin</option><option value="shy">Shareholder yield</option><option value="roe">Return on equity</option>
+  <option value="mcap">Market value</option></select></div>
+</div><p class="desc" id="cnt"></p><div id="list"></div>""")
 
-    first = "disc" if discover_html and disc else "watch"
-    order = [("disc", "Discover"), ("watch", f"Watchlist"), ("all", "Explore all"), ("alerts", "Alerts")]
-    if first == "watch":
-        order = [order[1], order[0], order[2], order[3]]
-    tabs = "".join(f'<button data-t="{k}">{v}</button>' for k, v in order)
+    alert_items = "".join(
+        f'<li class="{x["tone"]}"><b>{TONE_ICON.get(x["tone"], "•")} {e(x["ticker"])} · {e(x["title"])}</b>'
+        f'<span>{e(x["body"])}</span><time>{x["date"][:16].replace("T", " ")} UTC</time></li>' for x in ctx["alerts"][:120])
+    ah = f'<ul class="alerts">{alert_items}</ul>' if alert_items else '<p class="empty">No alerts yet.</p>'
+    if ctx["errors"]:
+        ah += '<h2>Problems in last run</h2><ul class="err">' + "".join(f"<li>{e(x)}</li>" for x in ctx["errors"][:40]) + "</ul>"
+    tabs["alerts"] = ("🔔 Alerts", ah)
+    tabs["method"] = ("ℹ️ Method", METHOD_HTML)
 
+    nav = "".join(f'<button data-t="{k}">{v[0]}</button>' for k, v in tabs.items())
+    sections = "".join(f'<section id="{k}" hidden>{v[1]}</section>' for k, v in tabs.items())
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Pulse">
 <meta name="theme-color" content="#0b0f14">
-<title>CompanyPulse</title><style>{CSS}</style></head><body>
-<header><h1>CompanyPulse</h1><small>Updated {generated} · {universe_n} companies screened · data: SEC EDGAR · not investment advice</small></header>
-<nav class="tabs">{tabs}</nav>
-<main>
-<section id="disc">{discover_html}</section>
-<section id="watch" hidden>{watch_html}</section>
-<section id="all" hidden>{explore_html}</section>
-<section id="alerts" hidden>{alerts_html}</section>
-</main>
+<title>CompanyPulse</title><style>{CSS}{EXTRA_CSS}</style></head><body>
+<header><h1>CompanyPulse</h1><small>Updated {ctx['generated']} · {ctx['universe_n']} companies scored · {len(ranked)} fully analysed · not investment advice</small></header>
+<nav class="tabs">{nav}</nav>
+<main>{sections}</main>
 <script>{JS}</script>
 </body></html>"""
 
@@ -717,130 +956,274 @@ def universe_json(universe: list[dict]) -> str:
         return None if v is None or not math.isfinite(v) else round(v, 4)
 
     for c in universe:
-        m = c["analysis"]["metrics"]
-        for s in c["analysis"]["signals"]:
+        m, val, mk, rk = c["analysis"]["metrics"], c.get("val") or {}, c.get("market") or {}, c.get("rank")
+        all_sigs = c["analysis"]["signals"] + val.get("signals", [])
+        for s in all_sigs:
             sig.setdefault(s["id"], [s["tone"], "Multi-year growth streak" if s["id"] == "rev_streak" else s["title"]])
+        pre = c.get("pre_rank") or {}
         rows.append([c["ticker"], c["name"], c["exchange"], c["analysis"]["score"], m.get("revenue"),
                      r4(m.get("revenue_growth")), r4(m.get("cagr3")), r4(m.get("q_growth")), r4(m.get("net_margin")),
-                     r4(m.get("fcf_margin")), r4(m.get("roe")), r4(m.get("de")),
-                     [s["id"] for s in c["analysis"]["signals"]]])
+                     r4(m.get("fcf_margin")), r4(m.get("roe")), r4(m.get("de")), [s["id"] for s in all_sigs],
+                     c.get("sector") or "Other", r4(val.get("pe")), r4(val.get("fcf_yield")), val.get("label"),
+                     r4(mk.get("day_pct")), mk.get("mcap"), r4(val.get("shareholder_yield")), c.get("region") or "Other",
+                     (rk or pre).get("score", 0), rk["status"] if rk else "", (rk or pre).get("style", ""),
+                     (rk or pre).get("m")])
     return json.dumps({"rows": rows, "sig": sig, "edit": edit_url()}, separators=(",", ":"))
 
-# --------------------------------------------------------------------------- main
+# --------------------------------------------------------------------------- orchestration
 
-def run_watchlist(cfg: dict, state: dict, tickers: list[str]):
+def load_state() -> dict:
+    src = STATE_FILE if STATE_FILE.exists() else LEGACY_STATE if LEGACY_STATE.exists() else None
+    state = json.loads(src.read_text(encoding="utf-8")) if src else {}
+    for k, default in (("companies", {}), ("alerts", []), ("flags", {}), ("lei", {}), ("picks", {})):
+        state.setdefault(k, default)
+    return state
+
+
+def watchlist(cfg, state, tickers, screener, medians, universe_by_ticker):
+    import europe
+    import market
+
     tmap = ticker_map()
-    companies, new_alerts, errors = [], [], []
-    for t in tickers:
-        info = tmap.get(t) or tmap.get(t.replace(".", "-"))
-        if not info:
-            errors.append(f"{t}: ticker not found on SEC EDGAR (only US-listed companies are covered).")
+    companies, errors = [], []
+    for t, hint in tickers:
+        print(f"watchlist {t} ...", flush=True)
+        if t in universe_by_ticker:            # already analysed by discovery: reuse
+            c = universe_by_ticker[t]
+            c["in_watchlist"] = True
+            companies.append(c)
             continue
-        print(f"{t} ...", flush=True)
+        c = {"ticker": t, "in_watchlist": True}
         try:
-            raw = json.loads(sec_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{info['cik']:010d}.json"))
-            fin = parse(raw)
+            if europe.is_eu(t):
+                cached = state["lei"].get(t)
+                lei = cached["lei"] if cached and cached.get("hint") == hint else europe.resolve_lei(hint)
+                if not lei:
+                    raise ValueError("add the company name or LEI after '=', e.g. `ABI.BR = Anheuser-Busch`")
+                state["lei"][t] = {"hint": hint, "lei": lei}
+                fin = europe.fetch(lei)
+                c.update(name=hint or t, cik=None, fin=fin, region="Europe", region_src="EU-only")
+            else:
+                info = tmap.get(t) or tmap.get(t.replace(".", "-"))
+                if not info:
+                    raise ValueError("ticker not found on SEC EDGAR. For European stocks add the exchange suffix, e.g. ABI.BR")
+                import discover
+                fin = discover.company_fin(info["cik"])
+                mk = screener.get(market.norm(t)) or {}
+                c.update(name=info["name"], cik=info["cik"], fin=fin, market=mk,
+                         exchange=discover.LISTING.get(info["cik"], {}).get("exchange", "NYSE"),
+                         sector=mk.get("sector"), region=market.region(mk.get("country")))
             if not fin["annual"]:
-                raise ValueError("no annual financials in XBRL data")
+                raise ValueError("no annual financials found")
         except Exception as ex:
             errors.append(f"{t}: {ex}")
             continue
-        finally:
-            time.sleep(0.2)  # SEC fair-access: max 10 requests/second
+        c["analysis"] = analyze(c["fin"], cfg)
+        if c.get("market", {}).get("mcap"):
+            mcap = c["market"]["mcap"]
+            if c["fin"]["currency"] != "USD":
+                rate = market.fx("USD", c["fin"]["currency"])
+                mcap = mcap * rate if rate else None
+            c["val"] = market.valuation(c["fin"], c["analysis"]["metrics"], mcap, medians.get(c.get("sector")), c.get("sector"))
+        companies.append(c)
+    return companies, errors
 
-        an = analyze(fin, cfg)
-        new_alerts += detect_changes(t, state["companies"].get(t), an, fin, cfg)
-        state["companies"][t] = {"score": an["score"], "signals": [s["id"] for s in an["signals"]],
-                                 "filing": fin["filing"]["accn"] if fin["filing"] else None}
-        companies.append({"ticker": t, "cik": info["cik"], "name": info["name"], "fin": fin, "analysis": an})
-    state["companies"] = {k: v for k, v in state["companies"].items() if k in tickers}
-    return companies, new_alerts, errors
 
-
-def run_discovery(cfg: dict, state: dict, errors: list[str]):
-    if not cfg.get("discovery", True):
-        return [], {}, []
-    try:
-        import discover
-        universe = discover.run(cfg)
-    except Exception as ex:
-        errors.append(f"Discovery failed: {ex}")
-        return [], {}, []
-    disc = discover.lists(universe, cfg)
-
-    prev = state.get("discovery")
-    new_radar = []
-    if prev:
-        prev_radar = set(prev.get("radar", []))
-        new_radar = [c for c in disc["radar"] if c["ticker"] not in prev_radar]
-        prev_scores = prev.get("scores", {})
-        rising = []
-        for c in universe:
-            ps = prev_scores.get(c["ticker"])
-            if ps is not None and c["analysis"]["score"] - ps >= 10:
-                c["prev_score"] = ps
-                rising.append(c)
-        disc["rising"] = sorted(rising, key=lambda c: -(c["analysis"]["score"] - c["prev_score"]))
-    state["discovery"] = {"radar": [c["ticker"] for c in disc["radar"]],
-                          "scores": {c["ticker"]: c["analysis"]["score"] for c in universe}}
-    return universe, disc, new_radar
+def enrich(cands, screener, series, cfg, errors, deep: bool):
+    """Price trend for candidates; SEC events + insiders + news when deep=True."""
+    import cache
+    import events
+    import market
+    import ranking
+    for c in cands:
+        t = c["ticker"]
+        mk = screener.get(market.norm(t)) or {}
+        if not c.get("tech") and c.get("cik") and mk:
+            try:
+                hist = cache.get(f"hist:{t}", 20, lambda: market.nasdaq_history(t))
+                c["tech"] = market.technicals(hist, mk.get("price"), mk.get("day_pct"))
+                time.sleep(0.15)
+            except Exception:
+                own = series.get(market.norm(t))
+                if own and len(own) >= 130:
+                    c["tech"] = market.technicals({"closes": own, "price": own[-1]}, mk.get("price"), mk.get("day_pct"))
+        if deep and "ev" not in c:
+            c["ev"] = events.enrich(c.get("cik"), short_name(c["name"]) if c.get("region_src") != "EU-only" else c["name"])
+        c["rank"] = ranking.score(c)
+        if c.get("val") and c.get("tech"):
+            c["dca"] = market.dca_action(c["analysis"]["score"], c["val"], c["tech"])
 
 
 def main():
+    import cache
+    import market
+    import ranking
+
     cfg = load_config()
     tickers = load_tickers()
-    DOCS.mkdir(exist_ok=True)
-    state = json.loads(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else {"companies": {}, "alerts": []}
-
-    watch, watch_alerts, errors = run_watchlist(cfg, state, tickers)
-    universe, disc, new_radar = run_discovery(cfg, state, errors)
-
+    SITE.mkdir(exist_ok=True)
+    STATE_FILE.parent.mkdir(exist_ok=True)
+    state = load_state()
+    errors: list[str] = []
     now = datetime.now(timezone.utc).isoformat(timespec="minutes")
-    radar_alerts = [{"date": now, "ticker": c["ticker"], "tone": "info", "title": "New on your radar",
-                     "body": f"Score {c['analysis']['score']} · Rev {pct(c['analysis']['metrics'].get('revenue_growth'), True)}"
-                             f" · FCF margin {pct(c['analysis']['metrics'].get('fcf_margin'))} · {c['name']}"}
-                    for c in new_radar[:30]]
-    state["alerts"] = (list(reversed(watch_alerts + radar_alerts)) + state["alerts"])[:300]
+    today = datetime.now(timezone.utc).date()
+
+    try:
+        screener = market.nasdaq_screener()
+    except Exception as ex:
+        screener = {}
+        errors.append(f"Nasdaq price data unavailable this run ({ex}); valuations skipped.")
+    series = market.update_price_store(screener, cache.DIR / "prices.json") if screener else {}
+
+    # 1. whole-market screen (fundamentals + valuation)
+    universe, disc, medians = [], {}, {}
+    if cfg.get("discovery", True):
+        try:
+            import discover
+            universe = discover.run(cfg, screener)
+            medians = discover.attach_market(universe, screener) if screener else {}
+            disc = discover.lists(universe, cfg)
+        except Exception as ex:
+            errors.append(f"Discovery failed: {ex}")
+
+    # momentum from the app's own price history for everyone (once ~6 months of history exist)
+    for c in universe:
+        own = series.get(market.norm(c["ticker"]))
+        mk = c.get("market") or {}
+        if own and len(own) >= 130:
+            c["tech"] = market.technicals({"closes": own, "price": own[-1]}, mk.get("price"), mk.get("day_pct"))
+        qv, gm = ranking.prelim(c)
+        mo = ranking.momentum_score(c.get("tech") or {})
+        if mo is not None:
+            qv, gm = qv - 7.5 + 0.15 * mo, gm - 15 + 0.30 * mo
+        c["pre_rank"] = {"score": round(max(qv, gm)), "style": "Quality value" if qv >= gm else "Growth momentum", "m": mo}
+
+    # 2. shortlist: best preliminary scores in both styles (only investable sizes)
+    min_mcap = cfg.get("rank_min_mcap", 2e8)
+    investable = [c for c in universe if ((c.get("market") or {}).get("mcap") or 0) >= min_mcap and c["analysis"]["score"] >= 30]
+    n = cfg.get("shortlist_size", 120)
+    by_qv = sorted(investable, key=lambda c: -ranking.prelim(c)[0])[:n]
+    by_gm = sorted(investable, key=lambda c: -ranking.prelim(c)[1])[:n]
+    # always check the fastest growers too: early winners often look expensive and are not yet profitable
+    by_growth = sorted(investable, key=lambda c: (-ranking.growth_score(c["analysis"]["metrics"]),
+                                                  -(c["analysis"]["metrics"].get("revenue_growth") or 0)))[:cfg.get("growth_slice", 60)]
+    shortlist = list({c["ticker"]: c for c in by_qv + by_gm + by_growth}.values())
+    print(f"Shortlist: {len(shortlist)} companies", flush=True)
+
+    # 3. watchlist (reuses discovery data where possible)
+    by_ticker = {c["ticker"]: c for c in universe}
+    watch, w_err = watchlist(cfg, state, tickers, screener, medians, by_ticker)
+    errors += w_err
+
+    # 4. price trend + events for shortlist, then news for the best ones and the watchlist
+    cands = list({id(c): c for c in shortlist + watch}.values())
+    enrich(cands, screener, series, cfg, errors, deep=False)            # price trend
+    ranking.add_relative_strength(list({id(t): t for t in (c.get("tech") for c in universe + cands) if t}.values()))
+    for c in cands:
+        c["rank"] = ranking.score(c)
+    shortlist.sort(key=lambda c: -c["rank"]["score"])
+    deep = shortlist[:cfg.get("deep_count", 70)]
+    enrich(list({id(c): c for c in deep + watch}.values()), screener, series, cfg, errors, deep=True)  # events + news
+    ranking.assign_statuses(cands, cfg)
+    ranked = sorted(shortlist, key=lambda c: (ranking.STATUS_ORDER.index(c["rank"]["status"]), -c["rank"]["score"]))
+
+    # 5. alerts
+    alerts = []
+
+    def add_alert(t, tone, title, body):
+        alerts.append({"date": now, "ticker": t, "tone": tone, "title": title, "body": body})
+
+    first_run = not state.get("picks_initialized")
+    new_picks, new_t = [], set()
+    for c in ranked:
+        if c["rank"]["status"] in ("Strong buy", "Buy"):
+            seen = state["picks"].get(c["ticker"])
+            if not first_run and (not seen or (today - date.fromisoformat(seen)).days > 14):
+                new_picks.append(c)
+                new_t.add(c["ticker"])
+            state["picks"][c["ticker"]] = today.isoformat() if (not seen or c["ticker"] in new_t) else seen
+    state["picks"] = {t: d for t, d in state["picks"].items() if (today - date.fromisoformat(d)).days <= 60}
+    state["picks_initialized"] = True
+    for c in new_picks[:20]:
+        add_alert(c["ticker"], "pos", f"New {c['rank']['status']} signal ({c['rank']['score']})",
+                  f"{c['rank']['style']} · " + "; ".join(c["rank"]["why"][:2]))
+
+    for c in watch:
+        t = c["ticker"]
+        for a in detect_changes(t, state["companies"].get(t), c["analysis"], c["fin"], cfg):
+            alerts.append(a)
+        state["companies"][t] = {"score": c["analysis"]["score"], "signals": [s["id"] for s in c["analysis"]["signals"]],
+                                 "filing": c["fin"]["filing"]["accn"] if c["fin"].get("filing") else None}
+        flags = market.price_flags(c["tech"], c["dca"][0] if c.get("dca") else "", today.isoformat()) if c.get("tech") else {}
+        ev = c.get("ev") or {}
+        if ev.get("takeover"):
+            flags["ev_takeover"] = ("warn", "Takeover / merger filing", f"{ev['takeover']['form']} filed {ev['takeover']['date']}. Read the details.")
+        for rf in ev.get("red_flags", []):
+            flags[f"ev_rf_{rf['date']}"] = ("neg", f"Red flag: {rf['text']}", f"Filed {rf['date']}. Check the filing and news.")
+        if (ev.get("insiders") or {}).get("value", 0) >= 100_000:
+            flags["ev_insider"] = ("pos", "Insiders are buying", f"${ev['insiders']['value'] / 1e6:.2f}M bought on the open market in 90 days.")
+        if c.get("rank") and c["rank"]["status"] in ("Strong buy", "Buy"):
+            flags[f"rank_{c['rank']['status']}"] = ("pos", f"Now rated {c['rank']['status']}", "; ".join(c["rank"]["why"][:2]))
+        prev = state["flags"].get(t)
+        if prev is not None:
+            for k, (tone, title, body) in flags.items():
+                if k not in prev:
+                    add_alert(t, tone, title, body)
+        state["flags"][t] = list(flags)
+    keep = {t for t, _ in tickers}
+    for k in ("companies", "flags", "lei"):
+        state[k] = {t: v for t, v in state[k].items() if t in keep}
+
+    # discovery bookkeeping (improvers)
+    prev_disc = state.get("discovery") or {}
+    prev_scores = prev_disc.get("scores", {})
+    rising = []
+    for c in universe:
+        ps = prev_scores.get(c["ticker"])
+        if ps is not None and c["analysis"]["score"] - ps >= 10:
+            c["prev_score"] = ps
+            rising.append(c)
+    disc["rising"] = sorted(rising, key=lambda c: -(c["analysis"]["score"] - c["prev_score"]))
+    if universe:
+        state["discovery"] = {"scores": {c["ticker"]: c["analysis"]["score"] for c in universe}}
+
+    state["alerts"] = (list(reversed(alerts)) + state["alerts"])[:300]
     state["last_run"] = now
 
-    generated = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
-    (DOCS / "index.html").write_text(
-        render(watch, disc, new_radar, len(universe), state["alerts"], errors, generated, cfg), encoding="utf-8")
-    (DOCS / "universe.json").write_text(universe_json(universe), encoding="utf-8")
-    STATE_FILE.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
+    ctx = {"cfg": cfg, "ranked": ranked, "watch": watch, "new_picks": new_picks, "disc": disc, "alerts": state["alerts"],
+           "errors": errors, "universe_n": len(universe), "generated": datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")}
+    (SITE / "index.html").write_text(render(ctx), encoding="utf-8")
+    (SITE / "universe.json").write_text(universe_json(universe), encoding="utf-8")
 
-    # ---- notifications
-    by_ticker: dict[str, list[dict]] = {}
-    for a in watch_alerts:
-        by_ticker.setdefault(a["ticker"], []).append(a)
-    for t, items in by_ticker.items():
+    # 6. notifications
+    if new_picks and cfg.get("notify_buy_signals", True):
+        lines = [f"{c['ticker']} {c['rank']['score']} {c['rank']['status']} · {c['rank']['style']} · {c['name'][:22]}" for c in new_picks[:10]]
+        push(f"🟢 {len(new_picks)} new buy signal{'s' if len(new_picks) > 1 else ''}", "\n".join(lines), ["green_circle"], priority=4)
+    wl_alerts: dict[str, list[dict]] = {}
+    for a in alerts:
+        if a["ticker"] in keep:
+            wl_alerts.setdefault(a["ticker"], []).append(a)
+    for t, items in wl_alerts.items():
+        c = next((c for c in watch if c["ticker"] == t), None)
+        head = t + (f" · {c['rank']['status']} {c['rank']['score']}" if c and c.get("rank") else "") + \
+            (f" · DCA: {c['dca'][0]}" if c and c.get("dca") else "")
         neg = any(i["tone"] in ("neg", "warn") for i in items)
-        pos = any(i["tone"] == "pos" for i in items)
-        tags = ["chart_with_upwards_trend"] if pos and not neg else ["warning"] if neg and not pos else ["bar_chart"]
-        score = next((c["analysis"]["score"] for c in watch if c["ticker"] == t), "?")
-        push(f"{t} · score {score}", "\n".join(f"{TONE_ICON.get(i['tone'], '•')} {i['title']}: {i['body']}" for i in items),
-             tags, priority=4 if neg else 3)
-
-    if new_radar and cfg.get("notify_discoveries", True):
-        lines = [f"{c['ticker']} {c['analysis']['score']} · Rev {pct(c['analysis']['metrics'].get('revenue_growth'), True)}"
-                 f" · {c['name'][:28]}" for c in new_radar[:15]]
-        more = f"\n…and {len(new_radar) - 15} more" if len(new_radar) > 15 else ""
-        push(f"🔎 {len(new_radar)} new compan{'y' if len(new_radar) == 1 else 'ies'} on your radar", "\n".join(lines) + more,
-             ["mag"], priority=3)
-
-    if cfg["daily_summary"] and (watch or universe):
-        lines = [f"{c['ticker']} {c['analysis']['score']} ({c['analysis']['rating']})"
-                 for c in sorted(watch, key=lambda c: -c["analysis"]["score"])[:8]]
-        if universe:
-            lines.append(f"Discover: {len(disc.get('radar', []))} of {len(universe)} companies score "
-                         f"{cfg.get('discovery_min_score', 75)}+, {len(new_radar)} new today")
-        head = f"{len(watch_alerts)} watchlist change(s)" if watch_alerts else "No watchlist changes"
-        push(f"CompanyPulse · {head}", "\n".join(lines) + ("\n⚠ " + "; ".join(errors[:3]) if errors else ""),
+        push(head, "\n".join(f"{TONE_ICON.get(i['tone'], '•')} {i['title']}: {i['body']}" for i in items),
+             ["warning"] if neg else ["chart_with_upwards_trend"], priority=4 if neg else 3)
+    if cfg["daily_summary"] and state.get("summary_date") != today.isoformat() and (watch or ranked):
+        state["summary_date"] = today.isoformat()
+        lines = ["Top picks: " + ", ".join(f"{c['ticker']} {c['rank']['score']}" for c in ranked[:6])]
+        lines += [f"{c['ticker']}: {c['rank']['status'] if c.get('rank') else '–'}" + (f" · DCA {c['dca'][0]}" if c.get("dca") else "")
+                  for c in watch[:10]]
+        push("CompanyPulse · daily summary", "\n".join(lines) + ("\n⚠ " + "; ".join(errors[:2]) if errors else ""),
              ["newspaper"], priority=2)
 
-    print(f"\nDone: {len(watch)} watchlist, {len(universe)} screened, {len(new_radar)} new on radar, "
-          f"{len(watch_alerts)} alerts, {len(errors)} errors.")
-    for x in errors:
+    STATE_FILE.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
+    cache.prune()
+    print(f"\nDone: {len(universe)} scored, {len(shortlist)} shortlisted, "
+          f"{sum(c['rank']['status'] == 'Strong buy' for c in ranked)} strong buy, {sum(c['rank']['status'] == 'Buy' for c in ranked)} buy, "
+          f"{len(new_picks)} new picks, {len(watch)} watchlist, {len(alerts)} alerts, {len(errors)} errors.")
+    for x in errors[:20]:
         print("  !", x)
 
 
