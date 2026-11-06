@@ -7,7 +7,12 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: [companies.txt, config.json, "*.py"]
+    paths:
+      - companies.txt
+      - config.json
+      - requirements.txt
+      - "*.py"
+      - ".github/workflows/daily.yml"
 
 permissions:
   contents: write
@@ -25,23 +30,31 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Install trusted certificate bundle
+        run: python -m pip install -r requirements.txt
+
       - name: Restore data cache
         uses: actions/cache@v4
         with:
           path: cache
           key: pulse-cache-${{ github.run_id }}
           restore-keys: pulse-cache-
+
       - name: Run CompanyPulse
         env:
           SEC_CONTACT_EMAIL: ${{ secrets.SEC_CONTACT_EMAIL }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           DASHBOARD_URL: ${{ vars.DASHBOARD_URL || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
         run: python pulse.py
+
       - name: Save state
         run: |
           git config user.name "companypulse-bot"
@@ -50,9 +63,12 @@ jobs:
           git diff --cached --quiet || git commit -m "Update state $(date -u '+%F %H:%M')"
           git pull --rebase --autostash -q || true
           git push
+
       - uses: actions/configure-pages@v5
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
+
       - id: deploy
         uses: actions/deploy-pages@v4
