@@ -108,7 +108,7 @@ def _frames_universe(cfg: dict, cur: str, skip: set[int]) -> list[dict]:
     min_rev = cfg.get("discovery_min_revenue", 100_000_000) * rate
     results = []
     for cik, row in rev[Y].items():
-        if cik in skip or cik not in LISTING or row["val"] < min_rev or cik not in rev[Y - 1]:
+        if cik in skip or cik not in LISTING or row["val"] < min_rev:
             continue
         end_y = d(row["end"])
         annual = []
@@ -136,7 +136,7 @@ def _frames_universe(cfg: dict, cur: str, skip: set[int]) -> list[dict]:
                         best = (gap, float(v["val"]))
             last[key] = best[1] if best else None
         for p in annual:
-            p["fcf"] = p["ocf"] - abs(p["capex"] or 0) if p["ocf"] is not None else None
+            p["fcf"] = p["ocf"] - abs(p["capex"]) if p["ocf"] is not None and p["capex"] is not None else None
             if p["fcf"] is not None and p["revenue"] and abs(p["fcf"]) > p["revenue"]:
                 p["ocf"] = p["fcf"] = None  # brokers/banks: customer money distorts cash flow
         quarterly = sorted([{"end": d(fr[cik]["end"]), "revenue": float(fr[cik]["val"]), "net_income": None}
@@ -160,29 +160,75 @@ def _fin_from_json(f: dict) -> dict:
     return {**f, "annual": [conv(p) for p in f["annual"]], "quarterly": [conv(p) for p in f["quarterly"]]}
 
 
-def company_fin(cik: int) -> dict:
+def company_fin(cik: int, deadline=None) -> dict:
     def fetch():
-        raw = json.loads(core.sec_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"))
+        remaining = deadline - time.monotonic() if deadline else 60
+        if remaining < 1:
+            raise TimeoutError("Foreign discovery download budget reached")
+        raw = json.loads(core.sec_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
+                                     timeout=min(20, remaining) if deadline else 60, attempts=1 if deadline else 3))
         time.sleep(0.12)
         return _fin_to_json(core.parse(raw))
     return _fin_from_json(cache.get(f"fin2:{cik}", 20, fetch))
 
 
-def _foreign_universe(cfg: dict, screener: dict, skip: set[int]) -> list[dict]:
+def financials(ticker, cik, cfg, deadline=None, name=None):
+    """Use verified LEI fallbacks when SEC data is unavailable or cannot be parsed."""
+    try:
+        fin = company_fin(cik, deadline)
+        if (fin["annual"] and fin["annual"][-1].get("revenue")
+                and (date.today() - fin["annual"][-1]["end"]).days <= cfg.get("max_data_age_days", 700)):
+            return fin
+        raise ValueError("no recent usable annual revenue in SEC data")
+    except Exception:
+        from eu_discovery import canonical_name
+        lei = (cfg.get("financial_fallbacks", {}).get(ticker)
+               or cfg.get("_esef_name_index", {}).get(canonical_name(name)))
+        if not lei:
+            raise
+    import europe
+    from eu_discovery import Budget
+    seconds = min(60, deadline - time.monotonic()) if deadline else 60
+    def fetch():
+        return _fin_to_json(europe.fetch(lei, budget=Budget(requests=4, seconds=max(0, seconds))))
+    return _fin_from_json(cache.get(f"financial-esef:{lei}", 20, fetch))
+
+
+def foreign_candidates(cfg: dict, screener: dict, skip: set[int]) -> list[tuple]:
+    """Keep existing coverage; bound the additional smaller European filers."""
     by_ticker = {market.norm(v["ticker"]): (cik, v) for cik, v in LISTING.items()}
     min_mcap = cfg.get("foreign_min_mcap", 5e9)
-    out = []
-    picks = [(sym, row) for sym, row in screener.items()
-             if row.get("country") not in ("", "United States") and (row.get("mcap") or 0) >= min_mcap
-             and sym in by_ticker and by_ticker[sym][0] not in skip]
-    print(f"Discovery: {len(picks)} large foreign companies to check", flush=True)
-    for sym, row in picks:
-        cik, lst = by_ticker[sym]
-        try:
-            fin = company_fin(cik)
-        except Exception:
+    eu_min = cfg.get("europe_min_mcap", min_mcap)
+    existing, extra, asia = [], [], []
+    for sym, row in sorted(screener.items(), key=lambda item: (-(item[1].get("mcap") or 0), item[0])):
+        if row.get("country") in (None, "", "United States") or sym not in by_ticker:
             continue
-        if not fin["annual"] or not fin["annual"][-1].get("revenue") or len(fin["annual"]) < 2:
+        cik, lst = by_ticker[sym]
+        if cik in skip:
+            continue
+        cap = row.get("mcap") or 0
+        if cap >= min_mcap:
+            existing.append((sym, cik, lst))
+        elif market.region(row.get("country")) == "Europe" and cap >= eu_min:
+            extra.append((sym, cik, lst))
+        elif market.region(row.get("country")) == "Asia" and cap >= cfg.get("asia_min_mcap", min_mcap):
+            asia.append((sym, cik, lst))
+    return (existing + extra[:max(0, min(80, int(cfg.get("europe_extra_limit", 80))))]
+            + asia[:max(0, min(80, int(cfg.get("asia_extra_limit", 80))))])
+
+
+def _foreign_universe(cfg: dict, screener: dict, skip: set[int]) -> list[dict]:
+    out = []
+    deadline = time.monotonic() + 600
+    picks = foreign_candidates(cfg, screener, skip)
+    print(f"Discovery: {len(picks)} foreign companies to check (including smaller European filers)", flush=True)
+    for sym, cik, lst in picks:
+        try:
+            fin = financials(sym, cik, cfg, deadline, name=lst.get("name"))
+        except Exception as ex:
+            cfg.setdefault("_foreign_failures", {})[sym] = f"Financial data unavailable: {type(ex).__name__}: {ex}"
+            continue
+        if not fin["annual"] or not fin["annual"][-1].get("revenue"):
             continue
         if (date.today() - fin["annual"][-1]["end"]).days > cfg.get("max_data_age_days", 700):
             continue  # stale (stopped filing XBRL)
@@ -242,6 +288,7 @@ def lists(universe: list[dict], cfg: dict) -> dict[str, list[dict]]:
     min_score = cfg.get("discovery_min_score", 75)
     radar = [c for c in universe if c["analysis"]["score"] >= min_score]
     fast = sorted([c for c in universe if (m(c, "revenue_growth") or 0) >= 0.25
+                   and len(c["fin"]["annual"]) >= 2
                    and (c["fin"]["annual"][-2]["revenue"] or 0) >= 50e6   # skip "growth" from a near-zero base
                    and (m(c, "fcf") or -1) > 0
                    and (c["fin"]["annual"][-1]["net_income"] or -1) > 0],

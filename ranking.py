@@ -175,9 +175,9 @@ def assign_statuses(cands: list[dict], cfg: dict) -> None:
         mcap = (c.get("market") or {}).get("mcap") or 0
         if any(r.startswith("Red flag") for r in rk["risks"]):
             rk["status"] = "Avoid"
-        elif s >= 80 and n_strong < strong_max and rk["q"] >= 60 and rk["m"] is not None and mcap >= 5e8:
+        elif s >= 80 and n_strong < strong_max and rk["q"] >= 60 and rk["m"] is not None and mcap >= 5e8 and (c.get("val") or {}).get("value_score") is not None:
             rk["status"], n_strong = "Strong buy", n_strong + 1
-        elif s >= 70 and n_strong + n_buy < buy_max:
+        elif s >= 70 and n_strong + n_buy < buy_max and rk["m"] is not None and (c.get("val") or {}).get("value_score") is not None:
             rk["status"], n_buy = "Buy", n_buy + 1
         elif s >= 58:
             rk["status"] = "Watch"

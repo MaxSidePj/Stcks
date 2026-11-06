@@ -146,7 +146,7 @@ ASIA = {"China", "Hong Kong", "Japan", "Taiwan", "South Korea", "India", "Singap
 
 
 def region(country: str | None) -> str:
-    if not country or country == "United States":
+    if country == "United States":
         return "US"
     if country in EUROPE:
         return "Europe"

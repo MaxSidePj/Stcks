@@ -5,6 +5,7 @@ company must publish), served free by filings.xbrl.org. Annual data only.
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.parse
 import urllib.request
@@ -35,17 +36,22 @@ INSTANT = {"equity", "cash", "debt"}
 
 
 def is_eu(ticker: str) -> bool:
-    return "." in ticker and ticker.rsplit(".", 1)[1].upper() in EU_SUFFIXES
+    return (ticker.startswith("EU:") and len(ticker[3:]) == 20 and ticker[3:].isalnum()) or (
+        "." in ticker and ticker.rsplit(".", 1)[1].upper() in EU_SUFFIXES)
 
 
-def _get(path: str) -> dict:
+def _get(path: str, budget=None) -> dict:
     url = path if path.startswith("http") else BASE + path
-    req = urllib.request.Request(url, headers={"User-Agent": "CompanyPulse/1.0", "Accept": "application/json"})
+    contact = os.environ.get("SEC_CONTACT_EMAIL") or os.environ.get("GITHUB_REPOSITORY", "personal stock screener")
+    req = urllib.request.Request(url, headers={"User-Agent": f"CompanyPulse/1.0 ({contact})", "Accept": "application/json"})
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=90) as r:
+            timeout = budget.request() if budget else 90
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read())
         except Exception:
+            if budget and (budget.left <= 0 or time.monotonic() >= budget.end - 1):
+                raise
             if attempt == 2:
                 raise
             time.sleep(3)
@@ -67,18 +73,23 @@ def resolve_lei(long_name: str | None) -> str | None:
         return long_name.upper()
     if not long_name:
         return None
+    from eu_discovery import canonical_name
+    wanted = canonical_name(long_name)
     words = [w.strip(",.()") for w in long_name.replace("-", " ").split()]
     words = [w for w in words if w and w.lower() not in STOP]
+    queries = [long_name]
+    if len(words) == 1 and words[0].isalpha() and len(words[0]) <= 6:
+        queries.append(" ".join(words[0].upper()))
     for n in (2, 1):
         if len(words) < n:
             continue
-        hits = search(" ".join(words[:n]))
-        if len(hits) == 1:
-            return hits[0]["lei"]
-        exact = [h for h in hits if h["name"].lower().startswith(" ".join(words[:n]).lower())]
-        if len(exact) == 1:
-            return exact[0]["lei"]
-    return None
+        queries.append(" ".join(words[:n]))
+    matches = {}
+    for query in dict.fromkeys(queries):
+        for hit in search(query):
+            if canonical_name(hit["name"]) == wanted:
+                matches[hit["lei"]] = hit
+    return next(iter(matches)) if len(matches) == 1 else None
 
 
 def _period(p: str) -> tuple[date | None, date]:
@@ -91,8 +102,9 @@ def _period(p: str) -> tuple[date | None, date]:
     return None, day(p) - timedelta(days=1)
 
 
-def fetch(lei: str) -> dict:
-    filings = _get(f"/api/entities/{lei}/filings?page%5Bsize%5D=100")["data"]
+def fetch(lei: str, filings=None, budget=None, report_limit=3) -> dict:
+    if filings is None:
+        filings = _get(f"/api/entities/{lei}/filings?page%5Bsize%5D=100", budget)["data"]
     by_period: dict[str, dict] = {}
     for f in filings:
         a = f["attributes"]
@@ -103,7 +115,7 @@ def fetch(lei: str) -> dict:
         score = (a["json_url"].endswith("-en.json"), a.get("date_added") or "")
         if cur is None or score > cur["_score"]:
             by_period[a["period_end"]] = {**a, "_score": score}
-    reports = [by_period[k] for k in sorted(by_period)][-3:]
+    reports = [by_period[k] for k in sorted(by_period)][-report_limit:]
     if not reports:
         raise ValueError("no machine-readable annual reports found")
 
@@ -111,7 +123,7 @@ def fetch(lei: str) -> dict:
     starts: dict[date, date] = {}
     currency = None
     for rep in reports:  # oldest -> newest so newer reports overwrite restated numbers
-        facts = _get(rep["json_url"])["facts"]
+        facts = _get(rep["json_url"], budget)["facts"]
         for f in facts.values():
             dims = f.get("dimensions", {})
             if set(dims) - {"concept", "entity", "period", "unit", "language"}:

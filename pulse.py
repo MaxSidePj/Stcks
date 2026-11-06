@@ -68,7 +68,7 @@ def load_tickers() -> list[tuple[str, str]]:
 
 # --------------------------------------------------------------------------- SEC
 
-def sec_get(url: str) -> bytes:
+def sec_get(url: str, timeout=60, attempts=3) -> bytes:
     email = os.environ.get("SEC_CONTACT_EMAIL", "").strip()
     if "@" not in email:
         sys.exit("Set SEC_CONTACT_EMAIL (SEC requires a contact email in the User-Agent).")
@@ -76,17 +76,17 @@ def sec_get(url: str) -> bytes:
         "User-Agent": f"CompanyPulse/1.0 {email}",
         "Accept": "application/json",
     })
-    for attempt in range(3):
+    for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
-            if e.code in (429, 500, 502, 503) and attempt < 2:
+            if e.code in (429, 500, 502, 503) and attempt < attempts - 1:
                 time.sleep(2 + attempt * 3)
                 continue
             raise
         except urllib.error.URLError:
-            if attempt < 2:
+            if attempt < attempts - 1:
                 time.sleep(3)
                 continue
             raise
@@ -580,10 +580,17 @@ font:600 12px -apple-system,system-ui;background:var(--card);color:var(--mut)}.r
 JS = r"""
 const $=s=>document.querySelector(s);
 function tab(t){if(!document.getElementById(t))t=document.querySelector('.tabs button').dataset.t;
+ document.querySelectorAll('details.card[open]').forEach(card=>card.open=false);
  document.querySelectorAll('.tabs button').forEach(b=>{b.classList.toggle('on',b.dataset.t===t);if(b.dataset.t===t)b.scrollIntoView({inline:'center',block:'nearest'});});
  document.querySelectorAll('main>section').forEach(s=>s.hidden=s.id!==t);history.replaceState(null,'','#'+t);window.scrollTo(0,0);
- if(t==='all')loadAll();}
+ if(t==='all')loadAll();if(t==='catalogue')loadCatalogue();}
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>tab(b.dataset.t));
+document.addEventListener('toggle',event=>{
+ const card=event.target;
+ if(card.matches?.('details.card')&&card.open){
+  document.querySelectorAll('details.card[open]').forEach(other=>{if(other!==card)other.open=false;});
+ }
+},true);
 document.querySelectorAll('.regions').forEach(bar=>bar.querySelectorAll('button').forEach(b=>b.onclick=()=>{
  bar.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));const r=b.dataset.r;
  bar.parentElement.querySelectorAll('details.card').forEach(c=>c.hidden=r!=='All'&&c.dataset.region!==r);}));
@@ -602,31 +609,33 @@ function money(v){if(v==null)return'–';const a=Math.abs(v),g=v<0?'-$':'$';
  return a>=1e12?g+(a/1e12).toFixed(2)+'T':a>=1e9?g+(a/1e9).toFixed(2)+'B':g+(a/1e6).toFixed(0)+'M';}
 function num(id,div){const v=$(id).value;return v===''?-Infinity:+v/div;}
 function row(r){
+ const annual=r[2]==='ESEF',ring=annual?r[3]:r[21];
  const sigs=r[12].map(i=>`<li class="${U.sig[i][0]}"><b>${esc(U.sig[i][1])}</b></li>`).join('')||'<li>No notable signals.</li>';
- return `<details class="card"><summary><div class="ring ${sc(r[21])}" style="--p:${r[21]}"><span>${r[21]}</span></div>
- <div class="who"><div><b>${esc(r[0])}</b> ${r[22]?`<span class="status ${stc[r[22]]}">${r[22]}</span>`:''} ${r[16]?`<em class="${vc(r[16])}">${r[16]}</em>`:''}
+ return `<details class="card"><summary><div class="ring ${sc(ring)}" style="--p:${ring}"><span>${ring}</span></div>
+ <div class="who"><div><b>${esc(annual?r[1]:r[0])}</b> ${r[22]?`<span class="status ${stc[r[22]]}">${r[22]}</span>`:''} ${r[16]?`<em class="${vc(r[16])}">${r[16]}</em>`:''}
  <small class="inl">${esc(r[20])} · ${esc(r[13])} · ${money(r[18])}</small></div><small>${esc(r[1])}</small>
  <div class="chips"><span class="chip">Health ${r[3]}</span><span class="chip ${cls(r[5])}">Rev ${pct(r[5],1)}</span>
  ${r[7]!=null?`<span class="chip ${cls(r[7])}">Qtr ${pct(r[7],1)}</span>`:''}${r[15]!=null?`<span class="chip ${cls(r[15])}">FCF yld ${pct(r[15])}</span>`:''}
  ${r[14]!=null?`<span class="chip">P/E ${r[14].toFixed(1)}</span>`:''}${r[24]!=null?`<span class="chip">Mom ${r[24]}</span>`:''}</div></div></summary>
- <div class="body"><p class="foot">${r[22]?'Fully analysed (on the shortlist).':'Preliminary buy score: price trend and news not checked (not on today\'s shortlist).'} Style: ${esc(r[23]||'–')}</p>
+ <div class="body"><p class="foot">${annual?'Annual financials only · '+esc(r[25])+' · year ending '+esc(r[26])+'. No price-based Buy rating.':r[22]?'Fully analysed (on the shortlist).':'Preliminary buy score: price trend and news not checked (not on today\'s shortlist).'} Style: ${esc(r[23]||'–')}</p>
  <ul class="sigs">${sigs}</ul><div class="grid" style="margin-top:8px">
  <div><small>Net margin</small><b>${pct(r[8])}</b></div><div><small>3-yr CAGR</small><b class="${cls(r[6])}">${pct(r[6],1)}</b></div>
  <div><small>FCF margin</small><b>${pct(r[9])}</b></div><div><small>ROE</small><b>${pct(r[10])}</b></div>
  <div><small>Debt / equity</small><b>${r[11]==null?'–':r[11].toFixed(2)+'×'}</b></div><div><small>Shareholder yield</small><b>${pct(r[19])}</b></div></div>
- <div class="links"><a href="https://news.google.com/search?q=${encodeURIComponent(r[0]+' stock')}">News</a>
- <a href="https://www.google.com/finance/quote/${encodeURIComponent(r[0])}:${r[2]==='Nasdaq'?'NASDAQ':'NYSE'}">Chart</a>
- ${U.edit?`<a href="${U.edit}">＋ Watchlist</a>`:''}</div></div></details>`;}
+ <div class="links"><a href="https://news.google.com/search?q=${encodeURIComponent((annual?r[1]:r[0])+' stock')}">News</a>
+ ${annual?'<a href="https://filings.xbrl.org/">EU annual reports</a>':`<a href="https://www.google.com/finance/quote/${encodeURIComponent(r[0])}:${r[2]==='Nasdaq'?'NASDAQ':'NYSE'}">Chart</a>`}
+ ${U.edit?`<a href="${esc(U.edit)}">＋ Watchlist</a>`:''}</div>${annual?`<p class="foot">Add this line in the watchlist editor: <code>${esc(r[0]+' = '+r[1])}</code></p>`:''}</div></details>`;}
 function draw(){if(!U)return;const q=$('#q').value.trim().toLowerCase(),ms=num('#ms',1),mg=num('#mg',100),mb=num('#mb',1),
- sec=$('#sec').value,val=$('#val').value,reg=$('#reg').value,key=$('#sort').value;
+ sec=$('#sec').value,val=$('#val').value,reg=$('#reg').value,key=$('#sort').value,source=$('#source').value;
  const i={buy:21,score:3,growth:5,cagr:6,qg:7,fcf:9,fy:15,shy:19,roe:10,mcap:18,mom:24}[key];
  const rows=U.rows.filter(r=>r[3]>=ms&&r[21]>=mb&&(r[5]??-Infinity)>=mg&&(!sec||r[13]===sec)&&(!reg||r[20]===reg)
   &&(!val||(val==='A'?r[16]==='Attractive':r[16]&&r[16]!=='Expensive'))
+  &&(!source||(source==='esef'?r[2]==='ESEF':r[2]!=='ESEF'))
   &&(!q||r[0].toLowerCase().includes(q)||r[1].toLowerCase().includes(q)))
   .sort(key==='pe'?(a,b)=>(a[14]??1e9)-(b[14]??1e9):(a,b)=>(b[i]??-1e18)-(a[i]??-1e18));
  $('#cnt').textContent=`${rows.length} of ${U.rows.length} companies`+(rows.length>150?' · showing top 150':'');
  $('#list').innerHTML=rows.slice(0,150).map(row).join('')||'<p class="empty">No matches.</p>';}
-['#q','#ms','#mg','#mb','#sec','#val','#reg','#sort'].forEach(id=>$(id).addEventListener('input',draw));
+['#q','#ms','#mg','#mb','#sec','#val','#reg','#sort','#source'].forEach(id=>$(id).addEventListener('input',draw));
 tab(location.hash.slice(1)||document.querySelector('.tabs button').dataset.t);
 """
 
@@ -687,6 +696,8 @@ def card_html(c: dict, badge: str = "", rank: int | None = None) -> str:
 
     blocks = ""
     if rk:
+        if (c.get("tech") or {}).get("ret_6m") is None or (c.get("val") or {}).get("value_score") is None:
+            blocks += '<p class="foot">Preliminary score: valuation or momentum is incomplete. Missing inputs do not qualify this company for a Buy rating.</p>'
         blocks += ('<div class="factors">' + "".join(
             f'<div><small>{k}</small><b class="{score_class(v) if v is not None else ""}">{"–" if v is None else v}</b></div>'
             for k, v in (("Quality", rk["q"]), ("Value", rk["v"]), ("Growth", rk["g"]), ("Momentum", rk["m"]))) + "</div>")
@@ -714,8 +725,8 @@ def card_html(c: dict, badge: str = "", rank: int | None = None) -> str:
         blocks += '<h3>Valuation</h3><div class="grid">' + "".join(
             f'<div><small>{k}</small><b class="{kc}">{v}</b></div>' for k, v, kc in vgrid) + "</div>"
     elif c.get("region_src") == "EU-only":
-        blocks += ('<p class="foot">No free price feed for European exchanges, so there is no valuation or price trend. '
-                   'If the company also trades in the US (e.g. ASML, NVO, SAP), add the US ticker for the full analysis.</p>')
+        blocks += (f'<p class="foot">Annual financials only, year ending {e(str(f["annual"][-1]["end"]))}. '
+                   'This integration has no price, valuation or momentum data for this listing.</p>')
 
     evs = ""
     if ev.get("takeover"):
@@ -764,10 +775,24 @@ def card_html(c: dict, badge: str = "", rank: int | None = None) -> str:
         links.append(f'<a href="https://www.google.com/finance/quote/{e(c["ticker"])}:{"NASDAQ" if c["exchange"] == "Nasdaq" else "NYSE"}">Chart</a>')
     if c.get("cik"):
         links.append(f'<a href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={c["cik"]:010d}&owner=include&count=40">SEC filings</a>')
-    if c.get("region_src") == "EU-only":
+    if c.get("region_src") == "EU-only" or f.get("lei"):
         links.append('<a href="https://filings.xbrl.org/">EU annual reports</a>')
-    if c.get("exchange") and edit_url() and not c.get("in_watchlist"):
-        links.append(f'<a href="{edit_url()}">＋ Watchlist</a>')
+    if c.get("cik") and f.get("lei"):
+        blocks += (f'<p class="foot">Financials use the European annual-report fallback, year ending '
+                   f'{e(str(f["annual"][-1]["end"]))}. Price and market value use the US listing.</p>')
+    if edit_url():
+        if c.get("in_watchlist"):
+            links.append(f'<a href="{e(edit_url())}">Remove {e(c["ticker"])} from watchlist…</a>')
+            blocks += (f'<p class="foot">To remove {e(c["ticker"])}, open the removal link, delete its entire line '
+                       'in companies.txt, then tap Commit changes. The next successful check updates this page. '
+                       'The company can still appear in discovery.</p>')
+        else:
+            links.append(f'<a href="{e(edit_url())}">＋ Watchlist</a>')
+            if c["ticker"].startswith("EU:"):
+                blocks += (f'<p class="foot">To follow this company, add this line in the GitHub editor: '
+                           f'<code>{e(c["ticker"])} = {e(c["name"])}</code></p>')
+    if not rk:
+        blocks += '<p class="foot">Health score only here; full price-trend and event checks require the shortlist or watchlist.</p>'
 
     sub_parts = [x for x in (c.get("region"), c.get("sector") if c.get("sector") not in (None, "Other") else None,
                              money((c.get("market") or {}).get("mcap"), "USD") if (c.get("market") or {}).get("mcap") else None) if x]
@@ -778,7 +803,7 @@ def card_html(c: dict, badge: str = "", rank: int | None = None) -> str:
 <details class="card" data-region="{e(c.get('region') or 'Other')}">
   <summary>{rank_html}
     <div class="ring {score_class(ring)}" style="--p:{ring}"><span>{ring}</span></div>
-    <div class="who"><div><b>{e(c['ticker'])}</b> {badge} {status_badge(rk)} {vlabel} {sub}</div>
+    <div class="who"><div><b>{e(short_name(c['name']) if c['ticker'].startswith('EU:') else c['ticker'])}</b> {badge} {status_badge(rk)} {vlabel} {sub}</div>
       <small>{e(c['name'])}</small><div class="chips">{chips}</div></div>
   </summary>
   <div class="body">
@@ -833,19 +858,20 @@ the kind of profile early winners often show.</td></tr>
 </ul>
 <h3>Statuses</h3>
 <table>
-<tr><td><span class="status st-strong">Strong buy</span></td><td>78+: top on several factors at once</td></tr>
-<tr><td><span class="status st-buy">Buy</span></td><td>68-77</td></tr>
-<tr><td><span class="status st-watch">Watch</span></td><td>55-67: interesting, but something is missing (price, trend or quality)</td></tr>
-<tr><td><span class="status st-avoid">Avoid</span></td><td>below 55, or red flags</td></tr>
+<tr><td><span class="status st-strong">Strong buy</span></td><td>80+, within the configured daily quota; quality 60+, valuation and momentum available, market value $500M+</td></tr>
+<tr><td><span class="status st-buy">Buy</span></td><td>70+, within the configured combined Buy quota, with valuation and momentum available</td></tr>
+<tr><td><span class="status st-watch">Watch</span></td><td>58+, or a higher preliminary score that does not qualify for Buy</td></tr>
+<tr><td><span class="status st-avoid">Avoid</span></td><td>below 58, or relevant red flags</td></tr>
 </table>
 <h3>DCA actions (watchlist)</h3>
 <p><b>Buy extra</b>: quality 70+, not expensive, and temporarily down (15%+ below the high, under the 200-day average, or oversold).
 <b>DCA as usual</b>: healthy and fairly priced. <b>Hold</b>: average quality or a high price. <b>Wait</b>: expensive and stretched.
 <b>Review</b>: weak fundamentals.</p>
 <h3>Data and limits</h3>
-<p>Financials: SEC EDGAR (10-K, 10-Q, 20-F, 40-F), plus EU annual reports (ESEF) for European watchlist stocks.
+<p>Financials: SEC EDGAR (10-K, 10-Q, 20-F, 40-F), plus automatic discovery and watchlists using European annual reports (ESEF).
 Prices: Nasdaq end-of-day and current price. FX: ECB. Events: SEC 8-K/6-K, Form 4, SC 13D, SC TO and merger proxies. News: Google News.
-Stocks listed only in Europe or Asia (no US listing) have no free price feed: they get a quality score only.
+ESEF discovery builds gradually from report-source countries, including Belgium and France. It does not verify an equity listing on a particular exchange.
+This integration has no price feed for Europe-only listings: those entries get annual financial-health signals, without a Buy rating.
 Momentum for companies outside the shortlist builds up automatically from the app's own daily price history.
 These are rule-based signals to find companies worth researching. They are not investment advice: always read the latest results and news before you buy.</p>
 </div>"""
@@ -859,6 +885,7 @@ def list_section(items: list[dict], intro: str, cap: int) -> str:
 
 
 def render(ctx: dict) -> str:
+    import catalogue
     e = html.escape
     cfg = ctx["cfg"]
     ranked = ctx["ranked"]
@@ -876,6 +903,35 @@ def render(ctx: dict) -> str:
         growth, "Growth momentum: fast-growing companies whose price trend confirms the story. Higher potential, higher risk.", 30))
     tabs["value"] = ("💎 Value", list_section(
         value, "Quality value: strong businesses at reasonable prices. The steadiest compounders.", 30))
+    tabs["asia"] = ("🌏 Asia", (
+        '<p class="desc">US-listed Asian companies with SEC financials, plus local Taiwan TWSE, TPEx and Emerging listings. '
+        'Use Markets to search all loaded prices and partial financials, including smaller companies.</p>'
+        '<div class="links"><a href="#catalogue" onclick="document.querySelector(\'#cr\').value=\'Asia\';tab(\'catalogue\')">Browse Asian companies of all sizes</a></div>'
+        + list_section([c for c in ranked if c.get("region") == "Asia"], 'Fully ranked US-listed Asian companies.', 30)))
+    tabs["catalogue"] = ("🌐 Markets", catalogue.HTML)
+    european = sorted([c for c in ctx.get("europe", []) if c.get("region_src") != "EU-only"],
+                      key=lambda c: -(c.get("rank") or c.get("pre_rank") or {}).get("score", 0))
+    esef = sorted([c for c in ctx.get("europe", []) if c.get("region_src") == "EU-only"],
+                  key=lambda c: -c["analysis"]["score"])
+    esef_growth = sorted(esef, key=lambda c: -(c["analysis"]["metrics"].get("revenue_growth") or 0))
+    tabs["europe"] = ("🇪🇺 Europe", (
+        f'<p class="desc">{len(european)} European companies with usable SEC financials in this run. '
+        'Includes smaller US-listed companies. These are research candidates; '
+        'missing or old filings can exclude a company.</p>'
+        '<div class="links"><a href="#catalogue" onclick="document.querySelector(\'#cr\').value=\'Europe\';document.querySelector(\'#cd\').value=\'\';tab(\'catalogue\')">Search all European companies</a></div>'
+        f'<h2>European annual reports · {len(esef)} companies loaded</h2>'
+        '<p class="desc">Automatic discovery from ESEF reports, including Belgium, France and Sweden. '
+        'All indexed names are searchable in Markets immediately; financials load automatically for up to 40 companies per run and 200 per day, with a three-minute download budget. '
+        'Country is the report’s source country, not a verified exchange. Some companies also have US listings. '
+        'Annual health signals only; no price-based Buy rating.</p>'
+        '<div class="links"><a href="#catalogue" onclick="document.querySelector(\'#cr\').value=\'Europe\';document.querySelector(\'#cd\').value=\'European annual reports\';tab(\'catalogue\')">Search European annual-report companies</a></div>'
+        '<h3>Growing revenue · annual reports</h3>'
+        + "".join(card_html(c) for c in [c for c in esef_growth if (c["analysis"]["metrics"].get("revenue_growth") or 0) > 0][:15])
+        + '<h3>Financial health · annual reports</h3>'
+        + "".join(card_html(c) for c in esef[:15])
+        + '<h2>US-listed European companies</h2>'
+        '<p class="desc">Showing up to 40 by full or preliminary buy score. Cards without a Buy/Watch status show health only.</p>'
+        + "".join(card_html(c) for c in european[:40])))
 
     watch = ctx["watch"]
     order = ["Buy extra", "DCA as usual", "Hold", "Wait", "Review", None]
@@ -885,11 +941,16 @@ def render(ctx: dict) -> str:
     for c in ws:
         label = (c.get("val") or {}).get("label") or "no price data"
         dca = f'<span class="badge">DCA: {c["dca"][0]}</span>' if c.get("dca") else ""
-        rows += f'<div><b>{e(c["ticker"])}</b>{status_badge(c.get("rank"))}<span class="grow">{label}</span>{dca}</div>' 
+        rows += f'<div><b>{e(c["ticker"])}</b>{status_badge(c.get("rank"))}<span class="grow">{label}</span>{dca}</div>'
     wh = (f'<p class="desc">Your companies: Buy-score status, valuation and suggested DCA action.</p><div class="overview">{rows}</div>'
           + "".join(card_html(c) for c in ws)) if ws else '<p class="empty">Add tickers to companies.txt.</p>'
     if edit_url():
-        wh += f'<div class="links"><a href="{edit_url()}">Edit watchlist</a></div>'
+        wh += (f'<div class="links"><a href="{edit_url()}">Add / remove companies on GitHub</a></div>'
+               '<p class="desc">Delete a company’s entire line in companies.txt and commit to remove it. '
+               'Wait for the GitHub Actions check to finish, then reload. This also works when a company failed to load.</p>')
+    if ctx.get("local_watch"):
+        wh += '<h2>Taiwan watchlist · prices and partial financials</h2>'
+        wh += "".join(catalogue.local_card(c, edit_url()) for c in ctx["local_watch"])
     tabs["watch"] = ("⭐ Watchlist", wh)
 
     new_parts = []
@@ -911,6 +972,7 @@ def render(ctx: dict) -> str:
 <div class="filters">
   <div class="full"><input id="q" placeholder="Search ticker or name" autocomplete="off"></div>
   <div><label>Region</label><select id="reg"><option value="">All</option><option>US</option><option>Europe</option><option>Asia</option><option>Other</option></select></div>
+  <div><label>Data source</label><select id="source"><option value="">All</option><option value="esef">European annual reports</option><option value="sec">US listings / SEC</option></select></div>
   <div><label>Sector</label><select id="sec"></select></div>
   <div><label>Valuation</label><select id="val"><option value="">Any</option><option value="A">Attractive</option><option value="F">Fair or attractive</option></select></div>
   <div><label>Min buy score</label><input id="mb" type="number" inputmode="numeric" placeholder="any"></div>
@@ -944,7 +1006,9 @@ def render(ctx: dict) -> str:
 <header><h1>CompanyPulse</h1><small>Updated {ctx['generated']} · {ctx['universe_n']} companies scored · {len(ranked)} fully analysed · not investment advice</small></header>
 <nav class="tabs">{nav}</nav>
 <main>{sections}</main>
-<script>{JS}</script>
+<script>{JS.replace("tab(location.hash.slice(1)||document.querySelector('.tabs button').dataset.t);", "")}
+{catalogue.JS}
+tab(location.hash.slice(1)||document.querySelector('.tabs button').dataset.t);</script>
 </body></html>"""
 
 
@@ -967,7 +1031,8 @@ def universe_json(universe: list[dict]) -> str:
                      c.get("sector") or "Other", r4(val.get("pe")), r4(val.get("fcf_yield")), val.get("label"),
                      r4(mk.get("day_pct")), mk.get("mcap"), r4(val.get("shareholder_yield")), c.get("region") or "Other",
                      (rk or pre).get("score", 0), rk["status"] if rk else "", (rk or pre).get("style", ""),
-                     (rk or pre).get("m")])
+                     (rk or pre).get("m"), c["fin"]["currency"],
+                     str(c["fin"]["annual"][-1]["end"])])
     return json.dumps({"rows": rows, "sig": sig, "edit": edit_url()}, separators=(",", ":"))
 
 # --------------------------------------------------------------------------- orchestration
@@ -997,18 +1062,26 @@ def watchlist(cfg, state, tickers, screener, medians, universe_by_ticker):
         try:
             if europe.is_eu(t):
                 cached = state["lei"].get(t)
-                lei = cached["lei"] if cached and cached.get("hint") == hint else europe.resolve_lei(hint)
+                from eu_discovery import canonical_name
+                mapped = cfg.get("_esef_name_index", {}).get(canonical_name(hint))
+                lei = t[3:] if t.startswith("EU:") else (mapped or
+                    (cached["lei"] if cached and cached.get("hint") == hint and cached.get("verified_name") else europe.resolve_lei(hint)))
                 if not lei:
                     raise ValueError("add the company name or LEI after '=', e.g. `ABI.BR = Anheuser-Busch`")
-                state["lei"][t] = {"hint": hint, "lei": lei}
-                fin = europe.fetch(lei)
-                c.update(name=hint or t, cik=None, fin=fin, region="Europe", region_src="EU-only")
+                state["lei"][t] = {"hint": hint, "lei": lei, "verified_name": True}
+                import cache
+                import discover
+                fin = discover._fin_from_json(cache.get(f"financial-esef:{lei}", 20,
+                    lambda: discover._fin_to_json(europe.fetch(lei))))
+                entry = state.get("esef_discovery", {}).get("catalogue", {}).get(lei, {})
+                label = entry.get("name") if hint and len(hint) == 20 and hint.isalnum() else hint
+                c.update(name=label or t, cik=None, fin=fin, region="Europe", region_src="EU-only", country=entry.get("country"), exchange="ESEF")
             else:
                 info = tmap.get(t) or tmap.get(t.replace(".", "-"))
                 if not info:
                     raise ValueError("ticker not found on SEC EDGAR. For European stocks add the exchange suffix, e.g. ABI.BR")
                 import discover
-                fin = discover.company_fin(info["cik"])
+                fin = discover.financials(t, info["cik"], cfg, name=info.get("name"))
                 mk = screener.get(market.norm(t)) or {}
                 c.update(name=info["name"], cik=info["cik"], fin=fin, market=mk,
                          exchange=discover.LISTING.get(info["cik"], {}).get("exchange", "NYSE"),
@@ -1036,6 +1109,11 @@ def enrich(cands, screener, series, cfg, errors, deep: bool):
     import market
     import ranking
     for c in cands:
+        if cfg.get("_enrich_deadline") and time.monotonic() >= cfg["_enrich_deadline"]:
+            message = "Detailed-analysis time budget reached; remaining companies retain preliminary data."
+            if message not in errors:
+                errors.append(message)
+            break
         t = c["ticker"]
         mk = screener.get(market.norm(t)) or {}
         if not c.get("tech") and c.get("cik") and mk:
@@ -1075,6 +1153,17 @@ def main():
         errors.append(f"Nasdaq price data unavailable this run ({ex}); valuations skipped.")
     series = market.update_price_store(screener, cache.DIR / "prices.json") if screener else {}
 
+    # Build the full European issuer catalogue before SEC screening so any uniquely
+    # matching issuer can supply a financial fallback, without a ticker exception.
+    esef_companies = []
+    if cfg.get("esef_discovery", False):
+        try:
+            import eu_discovery
+            esef_companies, esef_errors = eu_discovery.run(cfg, state)
+            errors.extend(esef_errors)
+        except Exception as ex:
+            errors.append(f"European annual-report discovery failed: {ex}")
+
     # 1. whole-market screen (fundamentals + valuation)
     universe, disc, medians = [], {}, {}
     if cfg.get("discovery", True):
@@ -1099,36 +1188,63 @@ def main():
         c["pre_rank"] = {"score": round(max(qv, gm)), "style": "Quality value" if qv >= gm else "Growth momentum", "m": mo}
 
     # 2. shortlist: best preliminary scores in both styles (only investable sizes)
+    universe.extend(esef_companies)
+    local_rows = []
+    if cfg.get("taiwan_discovery", False):
+        try:
+            import taiwan
+            local_rows, local_errors = taiwan.run(cfg)
+            errors.extend(local_errors)
+        except Exception as ex:
+            errors.append(f"Taiwan discovery failed: {type(ex).__name__}")
     min_mcap = cfg.get("rank_min_mcap", 2e8)
     investable = [c for c in universe if ((c.get("market") or {}).get("mcap") or 0) >= min_mcap and c["analysis"]["score"] >= 30]
-    n = cfg.get("shortlist_size", 120)
+    n = min(120, max(0, int(cfg.get("shortlist_size", 120))))
     by_qv = sorted(investable, key=lambda c: -ranking.prelim(c)[0])[:n]
     by_gm = sorted(investable, key=lambda c: -ranking.prelim(c)[1])[:n]
     # always check the fastest growers too: early winners often look expensive and are not yet profitable
     by_growth = sorted(investable, key=lambda c: (-ranking.growth_score(c["analysis"]["metrics"]),
                                                   -(c["analysis"]["metrics"].get("revenue_growth") or 0)))[:cfg.get("growth_slice", 60)]
-    shortlist = list({c["ticker"]: c for c in by_qv + by_gm + by_growth}.values())
+    # Reserve analysis capacity for Europe even when US names dominate the global scores.
+    by_europe = sorted([c for c in investable if c.get("region") == "Europe"],
+                       key=lambda c: -c["pre_rank"]["score"])[:cfg.get("europe_shortlist_size", 20)]
+    by_asia = sorted([c for c in investable if c.get("region") == "Asia"],
+                     key=lambda c: -c["pre_rank"]["score"])[:cfg.get("asia_shortlist_size", 20)]
+    small = sorted([c for c in investable if (c.get("market") or {}).get("mcap", 0) < 2e9],
+                   key=lambda c: (-ranking.growth_score(c["analysis"]["metrics"]), -c["pre_rank"]["score"]))[:cfg.get("smallcap_slice", 30)]
+    shortlist = list({c["ticker"]: c for c in by_qv + by_gm + by_growth + by_europe + by_asia + small}.values())
     print(f"Shortlist: {len(shortlist)} companies", flush=True)
 
     # 3. watchlist (reuses discovery data where possible)
     by_ticker = {c["ticker"]: c for c in universe}
-    watch, w_err = watchlist(cfg, state, tickers, screener, medians, by_ticker)
+    import taiwan
+    local_ids = {c["ticker"]: c for c in local_rows}
+    local_tickers = {t for t, _ in tickers if taiwan.is_ticker(t)}
+    local_watch = [local_ids[t] for t in sorted(local_tickers) if t in local_ids]
+    errors.extend(f"{t}: local Taiwan data unavailable this run" for t in local_tickers if t not in local_ids)
+    watch, w_err = watchlist(cfg, state, [(t, hint) for t, hint in tickers if t not in local_tickers], screener, medians, by_ticker)
     errors += w_err
+    # Reuse already downloaded European watchlist reports in global discovery too.
+    # Persist them so removing a personal watchlist entry does not remove discovery.
+    import eu_discovery
+    eu_discovery.share_reports(universe, watch, state)
 
     # 4. price trend + events for shortlist, then news for the best ones and the watchlist
-    cands = list({id(c): c for c in shortlist + watch}.values())
+    # ESEF-only entries have no valuation/momentum: keep them outside Buy rankings.
+    cands = list({id(c): c for c in watch + shortlist if c.get("region_src") != "EU-only"}.values())
+    cfg["_enrich_deadline"] = time.monotonic() + 600
     enrich(cands, screener, series, cfg, errors, deep=False)            # price trend
     ranking.add_relative_strength(list({id(t): t for t in (c.get("tech") for c in universe + cands) if t}.values()))
     for c in cands:
         c["rank"] = ranking.score(c)
     shortlist.sort(key=lambda c: -c["rank"]["score"])
     deep = shortlist[:cfg.get("deep_count", 70)]
-    enrich(list({id(c): c for c in deep + watch}.values()), screener, series, cfg, errors, deep=True)  # events + news
+    enrich(list({id(c): c for c in deep + watch if c.get("region_src") != "EU-only"}.values()), screener, series, cfg, errors, deep=True)  # events + news
     ranking.assign_statuses(cands, cfg)
     ranked = sorted(shortlist, key=lambda c: (ranking.STATUS_ORDER.index(c["rank"]["status"]), -c["rank"]["score"]))
 
     # 5. alerts
-    alerts = []
+    alerts = taiwan.watch_alerts(local_watch, state, local_tickers, cfg, now)
 
     def add_alert(t, tone, title, body):
         alerts.append({"date": now, "ticker": t, "tone": tone, "title": title, "body": body})
@@ -1190,10 +1306,17 @@ def main():
     state["alerts"] = (list(reversed(alerts)) + state["alerts"])[:300]
     state["last_run"] = now
 
-    ctx = {"cfg": cfg, "ranked": ranked, "watch": watch, "new_picks": new_picks, "disc": disc, "alerts": state["alerts"],
-           "errors": errors, "universe_n": len(universe), "generated": datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")}
+    ctx = {"cfg": cfg, "ranked": ranked, "watch": watch, "local_watch": local_watch, "new_picks": new_picks, "disc": disc, "alerts": state["alerts"],
+           "errors": errors, "universe_n": len(universe), "europe": [c for c in universe if c.get("region") == "Europe"],
+           "generated": datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")}
     (SITE / "index.html").write_text(render(ctx), encoding="utf-8")
     (SITE / "universe.json").write_text(universe_json(universe), encoding="utf-8")
+    import catalogue
+    import discover
+    pending = eu_discovery.pending_rows(state.get("esef_discovery", {}))
+    inventory = catalogue.build(universe, screener, discover.LISTING, local_rows,
+                                pending=pending, failures=cfg.get("_foreign_failures", {}))
+    (SITE / "catalogue.json").write_text(json.dumps({"rows": inventory, "edit": edit_url()}, separators=(",", ":")), encoding="utf-8")
 
     # 6. notifications
     if new_picks and cfg.get("notify_buy_signals", True):
