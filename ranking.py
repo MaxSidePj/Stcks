@@ -142,6 +142,9 @@ def score(c: dict) -> dict:
             why.append(f"Quality company {t['drawdown'] * -100:.0f}% below its 1-year high: buying opportunity if the thesis holds")
         if (t.get("rsi") or 50) > 78:
             risks.append(f"Overheated short term (RSI {t['rsi']:.0f}): consider waiting for a pullback")
+        if (t.get("vs_ma200") or 0) > 0.6:
+            risks.append(f"Price is {t['vs_ma200'] * 100:.0f}% above its 200-day average: big run already, "
+                         "buy in smaller steps and expect sharp swings")
     last_end = c["fin"]["annual"][-1]["end"] if c["fin"].get("annual") else None
     if last_end and (date.today() - last_end).days > 450:
         s -= 3
