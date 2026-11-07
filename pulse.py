@@ -1118,7 +1118,7 @@ def enrich(cands, screener, series, cfg, errors, deep: bool):
         mk = screener.get(market.norm(t)) or {}
         if not c.get("tech") and c.get("cik") and mk:
             try:
-                hist = cache.get(f"hist:{t}", 20, lambda: market.nasdaq_history(t))
+                hist = cache.get(f"hist2:{t}", 20, lambda: market.nasdaq_history(t))
                 c["tech"] = market.technicals(hist, mk.get("price"), mk.get("day_pct"))
                 time.sleep(0.15)
             except Exception:

@@ -73,9 +73,33 @@ def nasdaq_history(symbol: str) -> dict:
     sym = urllib.parse.quote(symbol.replace(".", "-"))
     d = _get_json(f"https://api.nasdaq.com/api/quote/{sym}/historical?assetclass=stocks&fromdate={start}&limit=400")
     rows = ((d.get("data") or {}).get("tradesTable") or {}).get("rows") or []
-    closes = [_num(r["close"]) for r in reversed(rows)]
-    closes = [c for c in closes if c]
-    return {"currency": "USD", "price": closes[-1] if closes else None, "closes": closes}
+    rows = [r for r in reversed(rows) if _num(r.get("close"))]
+    closes = [_num(r["close"]) for r in rows]
+    dates = [_us_date(r.get("date")) for r in rows]
+    return {"currency": "USD", "price": closes[-1] if closes else None, "closes": closes,
+            "dates": dates if all(dates) else []}
+
+
+def _us_date(s) -> str | None:
+    try:
+        return datetime.strptime(str(s).strip(), "%m/%d/%Y").date().isoformat()
+    except ValueError:
+        return None
+
+
+def reconcile(h: dict, price: float | None, day_pct: float | None) -> tuple[float | None, float | None, str | None]:
+    """Choose the newest trustworthy (price, daily change, session date).
+
+    The bulk Nasdaq screener sometimes lags one session behind (NVDA on 7 Nov 2026 still showed
+    Thursday's -8.9% while Friday closed +2.8%). Its implied previous close, price / (1 + change),
+    must equal the latest daily close for the snapshot to be newer than the history. Otherwise
+    the official daily closes are used, so a stale snapshot can never create a price alert."""
+    c, dates = h.get("closes") or [], h.get("dates") or []
+    if len(c) < 2 or not c[-2]:
+        return price, day_pct, None
+    if price and day_pct is not None and day_pct > -1 and abs(price / (1 + day_pct) / c[-1] - 1) <= 0.003:
+        return price, day_pct, None          # screener describes a newer (live) session
+    return c[-1], c[-1] / c[-2] - 1, dates[-1] if len(dates) == len(c) else None
 
 
 _ecb: dict[str, float] | None = None
@@ -119,6 +143,9 @@ def rsi(closes: list[float], n: int = 14) -> float | None:
 def technicals(h: dict, price: float | None = None, day_pct: float | None = None) -> dict:
     """Trend and momentum from ~1 year of daily closes. `price` = latest price (e.g. from the screener)."""
     c = h["closes"]
+    as_of = None
+    if h.get("dates"):                        # real daily closes: never trust a lagging snapshot
+        price, day_pct, as_of = reconcile(h, price, day_pct)
     price = price or h["price"] or (c[-1] if c else None)
     if not c or not price:
         return {}
@@ -129,7 +156,7 @@ def technicals(h: dict, price: float | None = None, day_pct: float | None = None
     def ret(n):
         return price / c[-n] - 1 if len(c) >= n and c[-n] else None
     return {
-        "currency": h.get("currency", "USD"), "price": price,
+        "currency": h.get("currency", "USD"), "price": price, "as_of": as_of,
         "day_pct": day_pct if day_pct is not None else (c[-1] / c[-2] - 1 if len(c) >= 2 and c[-2] else None),
         "high52": hi, "low52": lo, "drawdown": price / hi - 1,
         "ma50": ma50, "ma200": ma200, "vs_ma200": price / ma200 - 1 if ma200 else None,
@@ -277,7 +304,9 @@ def price_flags(t: dict, action: str, today: str) -> dict[str, tuple[str, str, s
     if t.get("price") and t.get("low52") and t["price"] <= t["low52"] * 1.01:
         f["low52"] = ("warn", "At a 52-week low", "Lowest price in a year. Check the news before buying.")
     if day is not None and day <= -0.06:
-        f[f"drop_{today}"] = ("warn", f"Dropped {day * -100:.1f}% today", "Big daily move. Check the news.")
+        session = t.get("as_of") or today      # one alert per trading session, not per run day
+        when = "today" if session == today else "on " + datetime.fromisoformat(session).strftime("%a %d %b")
+        f[f"drop_{session}"] = ("warn", f"Dropped {day * -100:.1f}% {when}", "Big daily move. Check the news.")
     return f
 
 
