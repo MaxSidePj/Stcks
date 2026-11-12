@@ -1,0 +1,19 @@
+Stcks empty-tab recovery
+
+Diagnosis verified on 12 November 2026:
+The published dashboard reports Nasdaq HTTP 403 Forbidden. Without quote market caps,
+the ranked shortlist is empty, while financial and watchlist alerts still run.
+
+Upload the supplied pulse.py to the ROOT of maxsidepj/Stcks, replacing pulse.py.
+Commit the change, then run Actions > Daily company check > Run workflow if needed.
+Wait for deployment to finish and reload the app.
+
+During quote outages, Top and Growth show clearly labelled financial research
+candidates using reported fundamentals. They are NOT current Buy ratings.
+Value explains that valuations need market prices. Normal rankings return when
+the upstream price feed recovers. This change does not restore Nasdaq access.
+Normal watchlist notifications and ranking criteria remain in place.
+
+Validation: 23 targeted offline regression tests passed, covering outage rendering,
+selection criteria, normal rendering, non-mutation of notification inputs,
+global coverage, dashboard JavaScript and price reconciliation.

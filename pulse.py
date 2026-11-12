@@ -884,6 +884,35 @@ def list_section(items: list[dict], intro: str, cap: int) -> str:
             "".join(card_html(c, rank=i + 1) for i, c in enumerate(items[:cap])))
 
 
+def price_outage_sections(universe: list[dict], cfg: dict) -> dict[str, str]:
+    """Keep financial research useful when quotes fail, without inventing Buy ratings."""
+    eligible = [c for c in universe if c.get("analysis") and c.get("fin", {}).get("annual")
+                and not (c.get("ev") or {}).get("takeover")]
+    quality = sorted([c for c in eligible if c["analysis"]["score"] >= cfg.get("discovery_min_score", 75)],
+                     key=lambda c: (-c["analysis"]["score"], c["ticker"]))
+    growers = sorted([c for c in eligible if c["analysis"]["score"] >= 60
+                      and (c["analysis"]["metrics"].get("revenue_growth") or 0) >= 0.25],
+                     key=lambda c: (-c["analysis"]["metrics"]["revenue_growth"], -c["analysis"]["score"], c["ticker"]))
+    notice = ('<p class="desc"><b>Price feed unavailable.</b> Current quotes and market caps could not be loaded. '
+              'These are financial research candidates, not current Buy picks. '
+              'Scores below measure financial health; valuation and price momentum are unavailable. '
+              'Normal Buy rankings return when prices recover.</p>')
+
+    def section(items, intro, cap):
+        # A watchlist company may already have a preliminary rank/price. Keep this view
+        # consistently financial-only and do not mutate the watchlist or alert inputs.
+        clean = [dict(c, rank=None, val={}, tech={}, dca=None, pre_rank=None) for c in items]
+        if not clean:
+            return notice + '<p class="empty">No financial candidates meet this view\'s criteria in this run.</p>'
+        return notice + list_section(clean, intro, cap)
+
+    return {
+        "top": section(quality, "Financial strength: strongest reported fundamentals, ordered by health score.", cfg.get("top_count", 50)),
+        "growth": section(growers, "Reported revenue growth of at least 25% and health of at least 60. Price momentum is not confirmed.", 30),
+        "value": notice + '<p class="empty">Value rankings need market prices and market caps. See Top or Growth for financial research candidates.</p>',
+    }
+
+
 def render(ctx: dict) -> str:
     import catalogue
     e = html.escape
@@ -903,6 +932,9 @@ def render(ctx: dict) -> str:
         growth, "Growth momentum: fast-growing companies whose price trend confirms the story. Higher potential, higher risk.", 30))
     tabs["value"] = ("💎 Value", list_section(
         value, "Quality value: strong businesses at reasonable prices. The steadiest compounders.", 30))
+    if ctx.get("price_feed_unavailable"):
+        for key, content in price_outage_sections(ctx.get("universe", []), cfg).items():
+            tabs[key] = (tabs[key][0], content)
     tabs["asia"] = ("🌏 Asia", (
         '<p class="desc">US-listed Asian companies with SEC financials, plus local Taiwan TWSE, TPEx and Emerging listings. '
         'Use Markets to search all loaded prices and partial financials, including smaller companies.</p>'
@@ -1146,10 +1178,14 @@ def main():
     now = datetime.now(timezone.utc).isoformat(timespec="minutes")
     today = datetime.now(timezone.utc).date()
 
+    price_feed_unavailable = False
     try:
         screener = market.nasdaq_screener()
+        if not any(r.get("price") and r.get("mcap") for r in screener.values()):
+            raise ValueError("No usable prices and market caps in Nasdaq response")
     except Exception as ex:
         screener = {}
+        price_feed_unavailable = True
         errors.append(f"Nasdaq price data unavailable this run ({ex}); valuations skipped.")
     series = market.update_price_store(screener, cache.DIR / "prices.json") if screener else {}
 
@@ -1307,6 +1343,7 @@ def main():
     state["last_run"] = now
 
     ctx = {"cfg": cfg, "ranked": ranked, "watch": watch, "local_watch": local_watch, "new_picks": new_picks, "disc": disc, "alerts": state["alerts"],
+           "universe": universe, "price_feed_unavailable": price_feed_unavailable,
            "errors": errors, "universe_n": len(universe), "europe": [c for c in universe if c.get("region") == "Europe"],
            "generated": datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")}
     (SITE / "index.html").write_text(render(ctx), encoding="utf-8")
